@@ -2,7 +2,7 @@
 
 Policy (what the owner asked for)
 ---------------------------------
-  * A user gets the file only after watching an ad (Monetag first, Tads.me as fallback, up to GATE_ROUNDS rounds).
+  * A user gets the file only after watching an ad (Monetag, up to GATE_ROUNDS rounds).
   * If after every round NO ad was ever displayed, the user is checked for an ad blocker:
         blocker found / can't prove clean  -> NO file
         provably clean                     -> file is delivered ("grace")

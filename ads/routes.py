@@ -127,12 +127,6 @@ async def _bootstrap(ctx: Ctx, body: dict):
         return None, {"ok": False, "code": "no_write", "bot": application.bot.username}
     except ctx.telegram_errors:
         pass
-    router = getattr(ctx.manager, "router", None)
-    if router is not None:
-        try:
-            await router.pin_here(user_id)               # direct launch has no /start: the user is working on THIS bot
-        except Exception as e:  # noqa: BLE001 - stickiness is best effort
-            slog.event("router_pin_failed", level="warning", error=type(e).__name__)
     sid = secrets.token_urlsafe(12)
     await ctx.db.create_session(sid=sid, token=token, user_id=user_id, chat_id=user_id,
                                 bot_id=application.bot_data["bot_id"], required=ctx.ads_required)
@@ -277,9 +271,9 @@ async def h_admin_overview(days: int) -> dict:
 async def h_admin_config() -> dict:
     cfg = await engine.get_config(force=True)
     return {"config": cfg, "secrets_set": {"monetag_postback": settings.RUNTIME["monetag_postback"]},
-            "env_ids": {"tads_widget_id": bool(settings.TADS_WIDGET_ID)},
+            "env_ids": {},
             "strict": bool(settings.RUNTIME["strict"]),
-            # honest labels: Tads.me has no server-side verification, so it is never "server_postback"
+            # honest labels: "server_postback" only when Monetag postback verification is active
             "reward_verification": {n: settings.trust_for(n) for n in NETWORKS}}
 
 
@@ -318,7 +312,7 @@ def register(app, *, auth, identify, send_file, db, token_re, telegram_errors, f
     from fastapi import Header, HTTPException, Request
     from fastapi.exception_handlers import request_validation_exception_handler
     from fastapi.exceptions import RequestValidationError
-    from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
+    from fastapi.responses import HTMLResponse, JSONResponse, Response
 
     settings.RUNTIME["monetag_postback"] = bool(policy.monetag_postback)
     settings.RUNTIME["strict"] = bool(policy.strict)

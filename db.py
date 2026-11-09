@@ -1,4 +1,3 @@
-import re
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -186,6 +185,20 @@ async def save_post(
             "views": 0,
             "created_at": time.time(),
         }
+    )
+
+
+async def file_by_source(src_chat, src_head: int):
+    """The post that was created from message `src_head` of `src_chat` (auto-poster channel import), or None. Uses the sparse (src_chat, src_head) index."""
+    return await files.find_one({"src_chat": src_chat, "src_head": src_head})
+
+
+async def add_channel_post(token: str, channel, msg_id: int, keep: int = 200):
+    """Remember a thumbnail post sent to a channel (handlers `pc:` and the auto-poster) so deleting the file removes it too.
+    Capped at `keep` entries: a looping auto-post would otherwise grow the record by one entry per cycle."""
+    await files.update_one(
+        {"token": token},
+        {"$push": {"channel_posts": {"$each": [{"channel": channel, "msg": msg_id}], "$slice": -keep}}},
     )
 
 

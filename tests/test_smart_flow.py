@@ -51,20 +51,19 @@ class FakeApp:
 
 
 class Base(unittest.IsolatedAsyncioTestCase):
-    NETS = {"monetag": True, "tads": True}
+    NETS = {"monetag": True}
     MIN_SECONDS = 0
 
     async def asyncSetUp(self):
         self.fdb = FakeDB()
         store.set_database(self.fdb)
         self.sess = FakeSessions(self.fdb)
-        self._saved = (settings.TADS_WIDGET_ID, dict(settings.RUNTIME))
-        settings.TADS_WIDGET_ID = "13070"
+        self._saved = dict(settings.RUNTIME)
         settings.RUNTIME["monetag_postback"] = False
         settings.RUNTIME["strict"] = False        # DEVELOPMENT profile (client-attested rewards allowed); strict mode is covered in test_ad_security.py
         self.policy = Policy(monetag_postback=False, min_seconds=self.MIN_SECONDS, wait_seconds=20, strict=False)
         service.configure(service.Deps(sessions=self.sess, policy=self.policy))
-        await store.save_config({"mode": "priority", "priority": ["monetag", "tads"], "max_attempts": 3,
+        await store.save_config({"mode": "priority", "priority": ["monetag"], "max_attempts": 3,
                                  "networks": {n: {"enabled": e, "allow_client_reward": True} for n, e in self.NETS.items()}})
         engine.invalidate()
         self.sent = []
@@ -92,8 +91,7 @@ class Base(unittest.IsolatedAsyncioTestCase):
         self.init = make_init_data()
 
     async def asyncTearDown(self):
-        settings.TADS_WIDGET_ID, rt = self._saved
-        settings.RUNTIME.clear(); settings.RUNTIME.update(rt)
+        settings.RUNTIME.clear(); settings.RUNTIME.update(self._saved)
         store.set_database(None); engine.invalidate()
 
     def body(self, **extra): return dict({"sid": "sid1", "init_data": self.init}, **extra)
@@ -161,18 +159,11 @@ class FallbackTests(Base):
     async def fail(self, ad, reason="no_fill"):
         return await routes.h_report(self.ctx, self.body(ad_id=ad["ad_id"], event="fail", reason=reason), "1.1.1.1")
 
-    async def test_monetag_unavailable_falls_back_to_tads(self):
+    async def test_monetag_unavailable_is_exhausted_not_infinite(self):
         a = await self.start()
         r = await self.fail(a, "blocked")
-        self.assertTrue(r["ok"] and r["next"]["ok"]); self.assertEqual(r["next"]["network"], "tads")
-        self.assertEqual(r["next"]["unit_id"], "13070")
-
-    async def test_both_unavailable_is_exhausted_not_infinite(self):
-        a = await self.start()
-        n = (await self.fail(a, "timeout"))["next"]
-        r = await self.fail(n, "no_fill")
-        self.assertTrue(r.get("exhausted")); self.assertNotIn("next", r)
-        again = await self.start()                                         # user can retry afterwards
+        self.assertTrue(r.get("exhausted")); self.assertNotIn("next", r)      # Monetag is the only network: nothing to fall back to
+        again = await self.start()                                             # user can retry afterwards
         self.assertTrue(again["ok"], again)
 
     async def test_no_second_ad_after_one_was_displayed(self):
@@ -180,13 +171,6 @@ class FallbackTests(Base):
         await routes.h_report(self.ctx, self.body(ad_id=a["ad_id"], event="shown"), "1.1.1.1")
         r = await self.fail(a, "error")
         self.assertTrue(r.get("exhausted") and r.get("displayed")); self.assertNotIn("next", r)
-
-    async def test_tads_not_offered_without_client_reward_permission(self):
-        await store.save_config({"mode": "priority", "priority": ["monetag", "tads"],
-                                 "networks": {"monetag": {"enabled": True}, "tads": {"enabled": True, "allow_client_reward": False}}}); engine.invalidate()
-        a = await self.start()
-        r = await self.fail(a, "no_fill")
-        self.assertTrue(r.get("exhausted")); self.assertNotIn("next", r)
 
 
 class RewardTests(Base):
@@ -228,22 +212,6 @@ class RewardTests(Base):
             self.assertFalse(r["ok"])
             a = await self.start() if not (await store.get_attempt(a["ad_id"]) or {}).get("outcome") is None else a
         self.assertEqual(self.sent, [])
-
-    async def test_tads_completion_only_counts_when_owner_allows_client_attestation(self):
-        await self.sess.col.update_one({"sid": "sid1"}, {"$set": {"smart_active": None}})
-        a = await self.start()
-        n = (await routes.h_report(self.ctx, self.body(ad_id=a["ad_id"], event="fail", reason="no_fill"), "1.1.1.1"))["next"]
-        r = await self.shown_then_claim(n)
-        self.assertTrue(r["ok"] and r["delivered"], r)                      # allowed in this fixture (allow_client_reward=True)
-        self.assertEqual(self.sent, ["tok1"])
-
-
-class TadsDeniedTests(Base):
-    async def test_tads_client_reward_flag_false_never_grants(self):
-        await store.save_config({"mode": "priority", "priority": ["tads", "monetag"],
-                                 "networks": {"tads": {"enabled": True, "allow_client_reward": False}, "monetag": {"enabled": False}}}); engine.invalidate()
-        r = await self.start()
-        self.assertEqual((r["ok"], r["code"]), (False, "no_network"))      # Tads can't be verified server-side => not served
 
 
 class ExpiryCleanupTests(Base):

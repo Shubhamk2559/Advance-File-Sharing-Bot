@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SECRET = "s3cr3t-Postback_0123456789abcdef"
 BASE = {"PATH": os.environ.get("PATH", ""), "MAIN_BOT_TOKEN": "123456:TEST-TOKEN", "OWNER_ID": "1", "MONGO_URI": "mongodb://unused",
         "WEBHOOK_SECRET": "test-webhook-secret-0123456789", "BASE_URL": "https://example.test", "PRIMARY_CHANNEL": "-1001", "BACKUP_CHANNEL": "-1002",
-        "TADS_WIDGET_ID": "13070", "MONETAG_POSTBACK_SECRET": SECRET}
+        "MONETAG_POSTBACK_SECRET": SECRET}
 
 
 def run(harness, extra=None):
@@ -76,8 +76,7 @@ class BotHandlerLimitTests(unittest.TestCase):
         self.assertTrue(o["other_user_ok"])
         self.assertEqual(o["callback_slowdowns"], 2)             # RL_BOT_MSG_USER=4/60 over 6 taps
         self.assertEqual(o["text_replies"], 4)                   # silent after the limit
-        self.assertEqual(o["sessions_during_outage"], 3)         # database down: still limited (strict local window), not unlimited
-        self.assertTrue(o["degraded"])
+        self.assertEqual(o["sessions_during_outage"], 3)         # bot limits are in-memory now: a database outage cannot unlimit them
 
 
 if __name__ == "__main__":

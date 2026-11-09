@@ -24,7 +24,7 @@ function env(o) {
   };
 }
 const okApi = async () => ({ ok: true, cid: "n", ttl: 90, baits: BAITS });
-const run = (e, extra) => G.check(e, Object.assign({ hosts: ["https://libtl.com/sdk.js", "https://w.tads.me/widget.js"], api: okApi, strict: true }, extra));
+const run = (e, extra) => G.check(e, Object.assign({ hosts: ["https://libtl.com/sdk.js"], api: okApi, strict: true }, extra));
 
 test("clean device: ok with proofs for every bait", async () => {
   const r = await run(env());
@@ -45,9 +45,8 @@ test("blocker that STUBS the script (onload fires, no proof) => blocked", async 
   assert.strictEqual(r.status, "blocked"); assert.ok(r.reasons.includes("bait:s2"));
 });
 
-test("ad host unreachable (Private DNS / DNS filter) => blocked; Tads host too", async () => {
+test("ad host unreachable (Private DNS / DNS filter) => blocked", async () => {
   assert.strictEqual((await run(env({ hosts: { "https://libtl.com/sdk.js": "fail" } }))).status, "blocked");
-  assert.strictEqual((await run(env({ hosts: { "https://w.tads.me/widget.js": "fail" } }))).status, "blocked");
 });
 
 test("hidden cosmetic bait => blocked", async () => {
@@ -100,18 +99,10 @@ test("Monetag script loaded but show_<zone> never appears => reason 'blocked'", 
   const r = await p;
   assert.deepStrictEqual([r.status, r.reason, r.shown], ["failed", "blocked", false]);
 });
-test("Tads widget loaded but tads.init never appears => reason 'blocked'", async () => {
-  const e = advEnv({}, true);
-  const p = SA.createAdapters(e).tads.run({ unit_id: "1", sdk: "x" }, { onShown() {} });
-  await e.advance(6000);
-  const r = await p;
-  assert.deepStrictEqual([r.status, r.reason], ["failed", "blocked"]);
-});
-
 test("runChain remembers that a provider was blocked even if the last one just had no fill", async () => {
   const adapters = { monetag: { run: async () => ({ status: "failed", reason: "blocked", shown: false }) },
-                     tads: { run: async () => ({ status: "failed", reason: "no_fill", shown: false }) } };
-  const api = async (p, b) => (b.ad_id === "a1" ? { ok: true, next: { ok: true, network: "tads", ad_id: "a2" } } : { ok: true, exhausted: true });
+                     netb: { run: async () => ({ status: "failed", reason: "no_fill", shown: false }) } };   // generic chain logic: "netb" is a fake second adapter
+  const api = async (p, b) => (b.ad_id === "a1" ? { ok: true, next: { ok: true, network: "netb", ad_id: "a2" } } : { ok: true, exhausted: true });
   const out = await SA.runChain({ network: "monetag", ad_id: "a1" }, adapters, api, null);
   assert.deepStrictEqual([out.kind, out.reason, out.sawBlocked, out.displayed], ["exhausted", "no_fill", true, false]);
 });

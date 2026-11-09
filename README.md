@@ -1,6 +1,5 @@
-# HelpBot — file delivery bot with Smart Ads (Monetag + Tads.me)
+# HelpBot — file delivery bot with Smart Ads (Monetag)
 
-> **Several bots / several Koyeb accounts?** See `KOYEB.md` -> "Multi-bot sticky routing" (users stay on one bot while active, new/idle users go to the least-loaded bot).
 
 Users open a link, watch **one rewarded ad** in the Telegram Mini App, and the file is delivered to their chat.
 The smart multi-network layer + **Ad gate** is **ON by default** (`SMART_ADS_ENABLED=true`); set it to `false` for the old Monetag-only flow.
@@ -9,15 +8,14 @@ The smart multi-network layer + **Ad gate** is **ON by default** (`SMART_ADS_ENA
 ```
 user opens file link
   └─ pre-check: ad hosts reachable? cosmetic bait visible?   blocked -> "Ad blocker detected", NO file
-  └─ ROUND 1..3  (GATE_ROUNDS):  Monetag  ──no ad──▶  Tads.me
+  └─ ROUND 1..3  (GATE_ROUNDS):  Monetag
         ad watched to the end ─────────────────────────────────────────────▶ FILE (server-verified)
   └─ all 3 rounds showed NO ad at all
         server-verified ad-blocker challenge
           blocker found / can't be proven clean / blocked SDK ───────────────▶ NO file ("Ad blocker detected")
           clean device ───────────────────────────────────────────────────────▶ FILE (grace, logged in `ad_grace`)
 ```
-* **Monetag is first.** Tads.me is a fallback **only in the development profile**: in production (`APP_ENV=production`, the default) Tads has no server-side verification, so it is never served and can never unlock a file (see "Security profile").
-  Change order/mode in 🧠 Smart Ads or `/admin/ads`.
+* **Monetag is the only ad network.** In production (`APP_ENV=production`, the default) rewards are verified by the Monetag server postback (see "Security profile").
 * **The server is the judge, not the browser.** `/api/gate/challenge` issues a one-time challenge; the page must fetch 4 bait resources on *our own origin* under ad-looking URLs
   (`/js/adframe.js`, `/pagead/js/adsbygoogle.js`, `/ads/banner/ad-banner.js`, `/banners/ads/ad-banner-300x250.gif`) - what EasyList/uBlock/AdGuard/Brave rules block.
   The server records each hit and the script baits return an HMAC the page must send back. A blocked/stubbed bait can never produce that, so `/api/smart/grace` refuses.
@@ -25,17 +23,17 @@ user opens file link
 * **Grace needs the server's own records**: 3 complete rounds where every attempt was a genuine `no_fill`/`timeout` (never `blocked`/`error`, never an ad that was displayed),
   >= `GATE_MIN_TOTAL_SECONDS` since the first attempt, no attempt still in flight, <= `GATE_GRACE_MAX_PER_HOUR` per user.
 * An ad script that loads but never defines its global (blocker returning an empty 200) is classified **blocked**, not "slow". Timeouts/unreachable hosts are never treated as clean.
-* Client also checks ad hosts (Monetag SDK host + Tads host), a cosmetic bait element and tampered `fetch`/natives; these only add blockers, never grant anything.
+* Client also checks ad hosts (Monetag SDK host), a cosmetic bait element and tampered `fetch`/natives; these only add blockers, never grant anything.
 * Rate limits for the gate are separate and generous (many users share one carrier-NAT IP; a refusal would look like a blocker).
 
 **Honest limits.** A blocker-bypass that works from inside Telegram would need to fetch the bait URLs and replay the HMACs by hand (custom code, not a browser extension / DNS filter / VPN). That is not preventable in any browser-side scheme;
 mitigations: Telegram `initData` signature, one live ad slot per session, 3-round + time gate, hourly cap, and `AD_VERIFY_MODE=postback` for Monetag (server-verified watches).
-Tads rewards are `client_attested` at best (Tads documents no postback) and are refused in production. Bait paths were chosen from common generic filter rules but **not tested against live filter lists here** - verify with uBlock Origin / AdGuard on Telegram Web after deploy,
-and adjust `ads/gate.py:BAITS` if one isn't blocked. Users on privacy browsers/DNS that block Tads will see "Ad blocker detected" (set `GATE_PROBE_TADS=false` if that hurts your region).
+Bait paths were chosen from common generic filter rules but **not tested against live filter lists here** - verify with uBlock Origin / AdGuard on Telegram Web after deploy,
+and adjust `ads/gate.py:BAITS` if one isn't blocked. Users on privacy browsers/DNS that block Monetag will see "Ad blocker detected".
 
 
-> Status: unit-tested (Python + JS) and exercised end-to-end in headless Chromium with mocked ad SDKs (watched ad, Monetag->Tads fallback, 3 no-ad rounds + clean device,
-> blocked bait/image/hosts/neutered SDK). **Not verified against live Tads / Monetag accounts** (no credentials). Follow "First live test" below before relying on it.
+> Status: unit-tested (Python + JS) and exercised end-to-end in headless Chromium with mocked ad SDKs (watched ad, 3 no-ad rounds + clean device,
+> blocked bait/image/hosts/neutered SDK). **Not verified against live Monetag accounts** (no credentials). Follow "First live test" below before relying on it.
 
 ## What was inspected / what is reused
 * "Reward" in this project = **file delivery** (there are no balances/referrals to protect). Reward state still lives in your
@@ -56,24 +54,14 @@ Reward trust: `server_postback` in postback mode, otherwise `client_attested` (t
 |---|---|---|
 | Monetag verification | server postback only, **mandatory** | legacy browser promise allowed |
 | `MONETAG_POSTBACK_SECRET` | **required**, 16-128 chars `A-Za-z0-9._~-`, else the app won't start | optional |
-| Tads.me | never serves, never unlocks (admin toggles are ignored/rejected) | client-attested fallback (labelled `client_attested`) |
 Postback endpoint `GET /api/monetag/postback`: constant-time secret check, per-IP limit on *failed* secrets, payload validation, then `ymid` must be one we issued for the same user (`telegram_id`), zone and a live session; not expired (`AD_ATTEMPT_MAX_AGE`), not already settled; exact repeats are idempotent. Rejections never say why in the response (server log only, never the secret).
-
-### Tads.me
-Checked on 2026-11-07 (tads.me/publisher-doc, tads.me/docs, github.com/TADS-me/tads-examples): only browser callbacks `onShowReward` / `onClickReward` / `onAdsNotFound` are documented. **No postback, webhook, signature, API key or reporting API.** The GitBook pages and `llms-full.txt` could not be fetched from this environment; re-check them or ask Tads support before relaxing this.
-1. Register at https://tads.me, add your Mini App (Publisher → Sites), create a **fullscreen** widget (Publisher → Widgets), copy the ID → `TADS_WIDGET_ID` (enables Tads automatically).
-2. Tads documents only browser callbacks (`onShowReward`, `onClickReward`, `onAdsNotFound`) — no postback, no signature, no reporting API that I could find.
-   Therefore Tads rewards are `client_attested`: honoured only in the development profile (`TADS_ALLOW_CLIENT_REWARD=true`), never in production.
-   A click is never treated as completion; only `onShowReward`.
 
 ### Credentials / IDs you must obtain
 | Item | Where | Env / setting |
 |---|---|---|
 | Monetag zone ID | existing | `MONETAG_ZONE_ID` (already set) |
-| Tads widget ID (fullscreen) | tads.me | `TADS_WIDGET_ID` (or dashboard field) |
 | Admin token | you invent it | `ADS_ADMIN_TOKEN` |
 
-No Tads API key is needed (no reporting API is documented); the widget ID is a public identifier, secrets stay in env.
 
 ## Turning it on
 1. `SMART_ADS_ENABLED=true`, `ADS_ADMIN_TOKEN=...`, plus the IDs above. Redeploy (the migration runs on startup; or `python -m ads.migrate`).
@@ -81,7 +69,7 @@ No Tads API key is needed (no reporting API is documented); the widget ID is a p
 3. Enter each network's real daily revenue from its own dashboard (Confirmed revenue form). This is what makes eCPM comparisons possible.
 
 ### First live test (do this before trusting it)
-1. Start with `mode=manual` + one network, `TADS_DEBUG=true` on a test platform; confirm the ad shows and the file arrives.
+1. Start with `mode=manual` on a test platform; confirm the ad shows and the file arrives.
 2. Production IDs, watch one ad per network yourself; check **Latest verified rewards** in the dashboard shows the right `trust`.
 3. Close/skip an ad and confirm **no file** arrives and the attempt shows as abandoned.
 
@@ -103,7 +91,7 @@ No Tads API key is needed (no reporting API is documented); the widget ID is a p
 * The optimizer runs every `ADS_OPT_INTERVAL`s under a DB lease (safe with multiple instances), stores the model + simulated traffic shares in the `plan` document and expires stuck attempts.
 
 ### "Rotation does nothing" — check this first
-Tads is only eligible when `TADS_WIDGET_ID` is set and Tads isn't switched off / client-attested rewards aren't disallowed. With one eligible network there is nothing to rotate.
+Rotation needs at least two eligible networks. Monetag is the only network configured here, so there is nothing to rotate.
 The admin dashboard (**Earnings engine** panel) now lists, per network, exactly why it gets no traffic (`switched off`, `no block/widget ID set`, `reward can't be server-verified…`, `cooling down`) and prints hints.
 
 ### Getting the most out of it
@@ -116,7 +104,6 @@ The admin dashboard (**Earnings engine** panel) now lists, per network, exactly 
 |---|---|---|---|
 | Monetag, `AD_VERIFY_MODE=postback` | `valued` impression postback for this ad's `ymid` | `server_postback` | strongest |
 | Monetag, legacy | SDK promise + min seconds | `client_attested` | existing behaviour |
-| Tads | `onShowReward` only | `client_attested` | opt-in |
 
 Always enforced: Telegram `initData` signature + session ownership, unique `ad_id` per attempt (also Monetag `ymid`), exactly-once outcome and reward
 record (`ad_rewards._id = ad_id`), client can send only `completed`/`non_valued` (revenue/trust/network are ignored), min-seconds, rate limits.
@@ -180,15 +167,11 @@ crashing background loops (restart with backoff), rate limiter (degrades to stri
 **Limits**: alerts need Telegram to work, so a Telegram outage alerts nobody (see logs / Koyeb). Counters are per process. Not tested against a live Telegram, MongoDB Atlas or Koyeb.
 
 ## Limitations / manual steps
-* No live publisher verification. Tads SDK usage follows their public docs as of 2026-11-05; the Tads vanilla-JS page was only partly readable (init key `widgetId`,
-  script `https://w.tads.me/widget.js` taken from docs + the official `TADS-me/tads-examples` repo). Re-check on first live test.
-* Revenue: no documented reporting API for Tads (and none for Monetag) ⇒ revenue/eCPM is **owner-entered** or "unavailable"; nothing is estimated for them.
-* Tads cannot be server-verified.
-* Monetag has no first-frame callback, so "displayed" is inferred (failure after ≥3 s counts as displayed → no fallback). Tads has no documented close callback: a closed overlay
-  ends via a 90 s timeout (abandoned).
+* Revenue: no documented reporting API for Monetag ⇒ revenue/eCPM is **owner-entered** or "unavailable"; nothing is estimated for it.
+* Monetag has no first-frame callback, so "displayed" is inferred (failure after ≥3 s counts as displayed → no fallback).
 * India/device segmentation is **not** used for ranking: none of the networks send country in callbacks; only Monetag zone stats can use `MONETAG_GEO_HEADER`.
 * Rate limits are now shared across instances (MongoDB, see "Rate limiting"). One live ad is enforced per session, not across multiple simultaneous sessions of the same user.
-* The Monetag default zone SDK tag is still loaded statically (existing behaviour); the Tads SDK loads lazily, only when selected.
+* The Monetag default zone SDK tag is still loaded statically (existing behaviour).
 
 
 ## Troubleshooting: `POST /api/smart/start → 422` and "Session expired."
@@ -208,7 +191,7 @@ server message) and only says "Session expired" when the server says so; 20 s re
 | `bad_content_type` / `invalid_json` | Client must send `Content-Type: application/json` and a JSON object |
 | "Session expired. Please open the link again." (`code: session`) | Real: sid unknown or older than `SESSION_TTL` (default 30 min) - reopen from the bot |
 | "Verification failed" | initData invalid/older than 1 h, or opened by a different Telegram user |
-| "No ad provider is available" (`no_network`) | No network is enabled+configured+trusted. Networks are enabled in **/admin/ads** (Tads defaults **off**); Tads is always excluded in production (and in development while `TADS_ALLOW_CLIENT_REWARD=false`) |
+| "No ad provider is available" (`no_network`) | No network is enabled+configured+trusted. Networks are enabled in **/admin/ads** |
 | "An ad is already loading" (`busy`) | One live ad per session; clears after `ADS_UNSHOWN_LOCK_SECONDS` |
 
 ### API smoke test
@@ -227,3 +210,15 @@ Full procedure, recommended settings, health checks and the first-deployment che
 Short version: Dockerfile builder, port 8000, health check path `/readyz` (readiness; `/` is liveness only), secrets as Koyeb Secrets, then
 follow the checklist. Logs must show `startup_complete` and `POST /api/smart/start 200`. **Production deployment has not been verified on a real
 Koyeb account by the author of this batch.**
+
+
+## 📅 Auto Poster (schedule posts into channels)
+
+Open **📅 Auto Poster** in the owner menu. Add the bot as admin in a channel/group, pick it in **🧭 Targets**, set **📅 Schedule** (interval, batch, window, days, jitter), and the shuffle engine posts on its own (loop or one-pass, duplicate skipping, per-channel footer, auto-delete, stats, backup/restore, force-sub gate, pinned prompt).
+
+### 📥 Channel → Posts
+1. Put your ads in a source channel (bot = admin there): a **video with caption**, then the **videos without caption directly below it**.
+2. Auto Poster → **📥 Channel → Posts** → pick the target channel → send the link of the first and the last message of the range.
+3. Every captioned video becomes one **post**: that video + `POST_CAPTION` + one button (`POST_BUTTON_TEXT`) that opens the file-sharing link; the caption-less videos below it are the files behind that link (up to `POST_MAX_VIDEOS`). The posts are queued in the target and published by its schedule.
+
+Notes: the bot reads each source message by forwarding it to a scratch chat (your DM) and deleting it again - bots cannot read channel history. Re-running a range never duplicates anything (a head already imported is reused, a post already queued is skipped), so the same ads can also be scheduled into another channel without copying the files again. Deleting a file in the bot also removes its channel posts and quarantines the queued post. PRIMARY / BACKUP channels can never become targets. All settings are `AP_*` variables (see `_.env.example`); data lives in `ap_*` collections of the same database (one shared connection, nothing extra to install).

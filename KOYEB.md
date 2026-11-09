@@ -135,14 +135,12 @@ Dhyan: extra zone Monetag dashboard me **main SDK zone** hona chahiye. Docs ye c
 | `MONETAG_BENCH_FAIL_RATE` / `_MIN_ATTEMPTS` / `_MINUTES` | `0.6` / `20` / `30` | Auto-bench |
 | `MONETAG_ADMIN_TOKEN` | khali | `/admin/monetag` Bearer token |
 | `MONETAG_GEO_HEADER` | khali | Proxy ka country header (country-wise eCPM) |
-| `SMART_ADS_ENABLED` | `true` | Monetag + Tads.me gate (false = purana Monetag-only flow) |
-| `TADS_WIDGET_ID` | khali | Tads.me fullscreen widget ID (set karte hi Tads fallback ban jata hai) |
-| `TADS_ALLOW_CLIENT_REWARD` | `false` | Development only. Ignored in production: Tads has no server-side verification, so it never unlocks a file |
+| `SMART_ADS_ENABLED` | `true` | Monetag gate (false = purana Monetag-only flow) |
 | `ADS_ADMIN_TOKEN` | khali | `/admin/ads` dashboard token |
-| `GATE_ROUNDS` | `3` | Monetag->Tads ke kitne round, phir ad-blocker check |
+| `GATE_ROUNDS` | `3` | Monetag ke kitne round, phir ad-blocker check |
 | `GATE_GRACE` | `true` | 3 round me koi ad nahi + blocker nahi => file de do (false = bina ad kabhi file nahi) |
 | `GATE_MIN_TOTAL_SECONDS` / `GATE_CHALLENGE_TTL` / `GATE_GRACE_MAX_PER_HOUR` | `8` / `90` / `20` | Gate tuning |
-| `GATE_PROBE_TADS` | `true` | Tads host unreachable = blocker (region me Tads block ho to `false`) |
+| `GATE_EXTRA_PROBES` | Google ad hosts | DNS ad-blockers ye hosts block karte hain; unreachable = blocker. Khali = off |
 
 Secrets (`MONETAG_POSTBACK_SECRET`, `MONETAG_ADMIN_TOKEN`) frontend me kabhi nahi jaate; access log me `secret=***` ban kar chhapte hain.
 
@@ -170,74 +168,3 @@ curl -X POST -H "Authorization: Bearer $MONETAG_ADMIN_TOKEN" -H "Content-Type: a
 * Health checks: see "Health checks: ONE rule" at the top of this file.
 * Migrations run at startup under a MongoDB lock. With several instances only one migrates, the others wait up to `MIGRATION_WAIT_TIMEOUT`.
   A failed migration stops the app (log event `startup_failed`, phase `migrations`; `/readyz` stays 503; process exits 1; owner alert sent).
-
-
----
-
-# Multi-bot sticky routing (many bots, many Koyeb accounts, one MongoDB)
-
-**Status: implemented and unit/simulation tested (`tests/test_routing*.py`); NOT deployed or load-tested on real Koyeb/Telegram/Atlas.** Follow
-"Rollout" and verify with `/admin/health` -> `routing`.
-
-## Topology
-```
- channel post / shared link ──▶ LINK_BASE_URL/f/<token>   (any service can answer: they all read the same fleet registry)
-                                  │  picks a bot in memory (microseconds), remembers it in a signed cookie
-        ┌─────────────────────────┼─────────────────────────┐
-        ▼                         ▼                         ▼
- Koyeb account A            Koyeb account B            Koyeb account C
- service: bot1              service: bot2              service: bot3          one service = one bot token = one webhook
-        └──────────── the same MongoDB (MONGO_URI / DB_NAME) ─────────────┘
-          route_bots (heartbeat of every bot) · route_assign (user -> bot) · files · sessions · ad verification · rate limits
-```
-Every bot can deliver every file (files, sessions, ad verification and rate limits are already in MongoDB). The router only decides **which bot a user lands on**.
-
-## What the user experiences
-| Situation | What happens |
-|---|---|
-| User clicks any link for the first time | Gateway sends them to the least-loaded live bot (power of two choices) and sets a signed `sb` cookie (bot + time, **no user id**). |
-| Same user clicks more links while active | Cookie says "bot2, 3 min ago" -> same bot2 every time. No switching. |
-| User is active on bot2 but a link opens bot3 (cookie lost, other browser) | Bot3 sees their Telegram id, serves them **right there** and re-pins them to bot3. No extra tap. |
-| User went idle longer than `STICKY_TTL` and comes back | They are placed on a lighter bot again (gateway: cookie expired; bot: only moved if this bot is overloaded and another is clearly lighter). |
-| Their bot is overloaded (load >= `ROUTER_OVERLOAD_RATIO`) | Active user: one "⚡ Continue" button to their pinned bot, or the lightest one. New/idle user: rebalanced. |
-| A bot crashes / stops heartbeating (`ROUTER_STALE_AFTER`, default 15 s) | Gateway stops sending anyone there, even users whose cookie says so. |
-| Telegram answers 429 (flood wait) to a bot | That bot takes no **new** users until the wait is over; users already inside keep being served. |
-| MongoDB blips | Last fleet view is trusted for `ROUTER_SNAPSHOT_GRACE` (60 s); a database hiccup does not pile everyone on one bot. Routing errors never block a delivery (arrival decision has a 2 s cap, then the user is served on the bot they are in). |
-
-Speed (measured in-process, 8 bots, fake DB, i.e. **excluding network**): gateway pick ~8 µs, arrival for a known active user ~4 µs. Both are memory-only.
-A brand-new or idle user costs 2 MongoDB operations (one `_id` read, one write): expect your Atlas round-trip time x2. Active users cost **one write per
-`ROUTER_TOUCH_EVERY` seconds** (60 s default), not one per click.
-
-## Rollout (per bot)
-1. BotFather: create the bot, set its Mini App to `https://<this-service>/app` if you use `DIRECT_MINIAPP`.
-2. New Koyeb service from the same repo/Dockerfile. Env, **identical on every service**: `MONGO_URI`, `DB_NAME`, `WEBHOOK_SECRET`, `OWNER_ID`,
-   `PRIMARY_CHANNEL`, `BACKUP_CHANNEL`, `LINK_BASE_URL`, `MONETAG_*`, `ADS_*`, `STICKY_TTL`.
-   **Different on every service:** `MAIN_BOT_TOKEN`, `BASE_URL` (this service's own https URL), `BOT_CAPACITY` (size it for that service's CPU/RAM), `INSTANCE_ID` (optional label).
-3. Deploy. The first heartbeat appears within seconds: open `/admin/health` -> `routing.bots` must list every bot as `usable: true`.
-4. **`LINK_BASE_URL` must be ONE host for all services** (a custom domain). The stickiness cookie is per host; if every service used its own host in links, the cookie would never be seen again.
-   Point the domain at one service (any of them can answer `/f/`), or put a load balancer / CDN in front; if that single service is down, links are down - that is the one
-   single point of failure of this design.
-5. `POST_DIRECT_LINK`: `true` (default) bakes a bot into each channel post (now the least-loaded one at post time, no longer random) and avoids Telegram's "Open Link"
-   confirmation, but that bot is fixed for the post's lifetime. `false` sends every click through the gateway (sticky + always the best current bot) but Telegram shows its confirmation box. Pick by what hurts more.
-6. Monetag: the postback is verified against MongoDB (`ymid` issued by us), so **one postback URL on the shared host works for every bot**. What I could **not** verify is whether Monetag
-   lets one zone serve several Mini App URLs or needs one zone per bot; check in the Monetag dashboard and add per-bot zones through `MONETAG_ZONES` if it requires it.
-7. Rollback: `ROUTING_ENABLED=false` on a service = old behaviour for that service (no heartbeat, no assignments). Collections `route_*` can stay.
-
-## Tuning
-| Var | Default | Meaning |
-|---|---|---|
-| `STICKY_TTL` | `900` | Idle seconds before a user may be moved. Longer = fewer moves, slower rebalancing. Also the cookie lifetime. |
-| `BOT_CAPACITY` | `1000` | **Active** users (seen within `STICKY_TTL`) this bot is sized for. `load = active / capacity`. Not a Telegram number: size it by what the service handles. Telegram also limits a bot (about 30 messages/s overall, 1/s per chat, per Telegram's FAQ - verify), so a bot that sends many videos per user needs a lower capacity. |
-| `ROUTER_OVERLOAD_RATIO` | `0.85` | Above this a bot stops taking new users if a lighter one exists. |
-| `ROUTER_HARD_RATIO` | `1.0` | At this load even cookie-sticky browsers are re-routed. If every bot is full the lightest still answers: nobody is refused. |
-| `ROUTER_MOVE_MARGIN` | `0.15` | An arrival is only moved to a bot at least this much lighter (a hop costs a tap, so near-equal bots never trigger it). |
-| `ROUTER_HB_INTERVAL` / `ROUTER_REFRESH_INTERVAL` / `ROUTER_STALE_AFTER` | `5` / `2` / `15` | Heartbeat, fleet reload, death detection. Load numbers are therefore up to ~7 s old; recent assignments are counted optimistically for 10 s so a burst does not stampede one bot. |
-| `ROUTER_TOUCH_EVERY` | `60` | Max one MongoDB write per active user per this many seconds. 5,000 simultaneously active users ~ 85 writes/s; check your Atlas tier's operations limit and raise this if needed. |
-
-## Honest limits
-* The gateway cannot know the Telegram user: Telegram does not tell a web link who clicked. Link-level stickiness is therefore **per browser** (signed cookie); in private mode or another in-app browser it
-  starts fresh. The bot-side rule ("follow the user") covers that case without a hop, and the `route_assign` row (per Telegram id) is what survives.
-* A user has to press Start on a bot once before it can message them (Telegram rule). Stickiness reduces how often that happens; it cannot remove the first time on each bot.
-* Load = active users, not messages per second. A flood-wait on one bot is handled reactively (penalty), not predicted.
-* Heartbeat liveness compares clocks of different hosts; keep them NTP-synced (cloud hosts are by default). Skew beyond `ROUTER_STALE_AFTER` would make bots look dead.
-* If your Koyeb plan stops idle services, that bot stops heartbeating and is treated as dead after ~15 s; users are sent elsewhere until it wakes up (a Telegram webhook hit wakes it). Check your plan's behaviour.

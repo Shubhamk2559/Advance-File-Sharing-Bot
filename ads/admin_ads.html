@@ -8,12 +8,12 @@
 <style>
   :root {
     --bg: #f2f4f6; --surface: #ffffff; --ink: #16212b; --muted: #5b6977; --line: #d9e0e6;
-    --monetag: #2f6fed; --tads: #12806b;
+    --monetag: #2f6fed;
     --ok: #12803f; --warn: #a8531a; --bad: #be3535; --focus: #2f6fed;
   }
   @media (prefers-color-scheme: dark) {
     :root { --bg: #11171d; --surface: #19212a; --ink: #e8eef3; --muted: #93a2b0; --line: #2b3641;
-            --monetag: #6f9bff; --tads: #3fc4a8; --ok: #52c783; --warn: #e89a61; --bad: #f07b7b; --focus: #6f9bff; }
+            --monetag: #6f9bff; --ok: #52c783; --warn: #e89a61; --bad: #f07b7b; --focus: #6f9bff; }
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-variant-numeric: tabular-nums; }
@@ -130,7 +130,7 @@
 <script>
 (function () {
   "use strict";
-  var NETS = ["monetag", "tads"], COLORS = { monetag: "var(--monetag)", tads: "var(--tads)" };
+  var NETS = ["monetag"], COLORS = { monetag: "var(--monetag)" };
   var $ = function (id) { return document.getElementById(id); };
   var token = "", cfg = null, prio = [];
   try { token = sessionStorage.getItem("ads_admin_token") || ""; } catch (e) {}
@@ -265,7 +265,7 @@
     renderPrio();
     var nc = $("netcfg"); nc.textContent = "";
     NETS.forEach(function (n) {
-      var v = c.networks[n], idLabel = n === "tads" ? "Widget ID" : null;
+      var v = c.networks[n], idLabel = null;
       var row = el("div", { class: "row" }, [el("strong", { text: n })]);
       var en = el("input", { type: "checkbox", "data-net": n, "data-k": "enabled" }); en.checked = v.enabled; row.appendChild(el("label", {}, [en, document.createTextNode("Enabled")]));
       var al = el("input", { type: "checkbox", "data-net": n, "data-k": "allow_client_reward" }); al.checked = v.allow_client_reward; row.appendChild(el("label", {}, [al, document.createTextNode("Allow client-attested rewards")]));

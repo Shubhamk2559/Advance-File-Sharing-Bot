@@ -3,8 +3,8 @@
   A. ads/security.py        environment profile, fail-closed startup, session expiry helper           (pure)
   B. ads/postback.py + monetag_store.record_postback   secret, shape, user/session/zone binding, expiry,
                             idempotency, replay                                                       (real code, in-memory Mongo)
-  C. strict-mode reward flow  Monetag only unlocks via a valid postback; Tads client callbacks never do
-  D. development profile     Tads client-attested path still works once, and replays / foreign claims are rejected
+  C. strict-mode reward flow  Monetag only unlocks via a valid postback; browser-only claims never do
+  D. development profile     Monetag client-attested path still works once, and replays / foreign claims are rejected
 
 The strict profile is the default everywhere; the development-profile classes opt out explicitly.
 """
@@ -82,10 +82,10 @@ class ProfileTests(unittest.TestCase):
             security.resolve({"APP_ENV": "development", "AD_VERIFY_MODE": "postback"})
         self.assertEqual(security.resolve({"APP_ENV": "development", "AD_VERIFY_MODE": "postback", **GOOD_ENV}).verify_mode, "postback")
 
-    def test_tads_client_reward_flag_is_ignored_in_production(self):
-        s = security.resolve({**GOOD_ENV, "TADS_ALLOW_CLIENT_REWARD": "true"})
+    def test_removed_tads_env_vars_are_ignored(self):
+        s = security.resolve({**GOOD_ENV, "TADS_ALLOW_CLIENT_REWARD": "true", "TADS_WIDGET_ID": "13070"})
         self.assertTrue(s.strict)
-        self.assertTrue(any("TADS_ALLOW_CLIENT_REWARD" in w for w in s.warnings))
+        self.assertFalse(any("TADS" in w.upper() for w in s.warnings))
 
     def test_numeric_settings_are_validated(self):
         self.assertEqual(security.resolve({**GOOD_ENV, "AD_ATTEMPT_MAX_AGE": "120"}).postback_max_age, 120)
@@ -443,46 +443,40 @@ class MonetagStrictFlowTests(StrictBase):
 async def _async(v): return v
 
 
-# ---------------------------------------------------------------- Tads in strict mode
-class TadsStrictTests(StrictBase):
-    async def tads_attempt(self):
-        ad_id = "sid1.tads0001"
-        await store.create_attempt({"_id": ad_id, "ad_id": ad_id, "sid": "sid1", "user_id": UID, "network": "tads", "attempt_no": 1,
+# ---------------------------------------------------------------- strict-mode trust rules
+class StrictTrustTests(StrictBase):
+    async def leftover_attempt(self, net="tads"):
+        """An attempt of a network that no longer exists (old deploy / tampered DB)."""
+        ad_id = f"sid1.{net}0001"
+        await store.create_attempt({"_id": ad_id, "ad_id": ad_id, "sid": "sid1", "user_id": UID, "network": net, "attempt_no": 1,
                                     "zone": None, "country": None, "t": time.time(), "round": 1, "chain_len": 1})
-        await self.sess.start_ad("sid1", ad_id, "tads")
+        await self.sess.start_ad("sid1", ad_id, net)
         return {"ad_id": ad_id}
 
-    async def test_tads_is_never_served_even_if_stored_config_allows_client_rewards(self):
-        # Base saved allow_client_reward=True for both networks: strict mode must override it
+    async def test_monetag_is_the_only_network_and_client_rewards_are_normalised_away(self):
+        # Base saved allow_client_reward=True: strict mode must override it
         a = await self.start()
         self.assertEqual(a["network"], "monetag")
         r = await routes.h_report(self.ctx, self.body(ad_id=a["ad_id"], event="fail", reason="no_fill"), "1.1.1.1")
-        self.assertTrue(r.get("exhausted")); self.assertNotIn("next", r)                       # no Tads fallback
+        self.assertTrue(r.get("exhausted")); self.assertNotIn("next", r)                       # nothing to fall back to
         cfg = await engine.get_config(force=True)
         self.assertEqual(engine.eligible(cfg), ["monetag"])
-        self.assertEqual(engine.blockers(cfg)["tads"], ["client_attested_not_allowed"])
+        self.assertFalse(cfg["networks"]["monetag"]["allow_client_reward"])
 
-    async def test_tads_only_configuration_serves_nothing(self):
-        await store.save_config({"mode": "priority", "priority": ["tads", "monetag"],
-                                 "networks": {"tads": {"enabled": True, "allow_client_reward": True}, "monetag": {"enabled": False}}})
-        engine.invalidate()
-        r = await self.start()
-        self.assertEqual((r["ok"], r["code"]), (False, "no_network"))
-
-    async def test_tads_client_callback_without_server_verification_never_unlocks(self):
-        t = await self.tads_attempt()                      # worst case: a Tads attempt exists anyway (tampered DB, old deploy)
+    async def test_leftover_attempt_of_a_removed_network_never_unlocks(self):
+        t = await self.leftover_attempt()
         await self.shown(t)
-        r = await self.claim(t, non_valued=False)          # the browser says "onShowReward fired"
+        r = await self.claim(t, non_valued=False)          # the browser says "completed"
         self.assertFalse(r["ok"]); self.assertNotIn("delivered", r)
         self.assertEqual((self.sent, self.rewards()), ([], []))
         att = await store.get_attempt(t["ad_id"])
-        self.assertEqual((att["outcome"], att["reason"]), ("denied", "client_attested_not_allowed"))
+        self.assertEqual((att["outcome"], att["reason"]), ("denied", "unknown_network"))
         again = await self.claim(t)                        # replay of the same callback
         self.assertFalse(again["ok"]); self.assertEqual((self.sent, self.rewards()), ([], []))
 
-    async def test_tads_postback_lookalike_does_not_verify_tads(self):
-        """A Monetag-style postback for a Tads attempt id is rejected (no monetag_ads record) and cannot grant."""
-        t = await self.tads_attempt(); await self.shown(t)
+    async def test_postback_lookalike_does_not_verify_a_removed_network(self):
+        """A Monetag-style postback for a leftover attempt id is rejected (no monetag_ads record) and cannot grant."""
+        t = await self.leftover_attempt(); await self.shown(t)
         st, _ = await postback.handle({"secret": SECRET, "ymid": t["ad_id"], "event_type": "impression", "reward_event_type": "valued",
                                        "telegram_id": str(UID)}, secret=SECRET, store=monetag_store)
         self.assertEqual(st, 403)
@@ -493,51 +487,51 @@ class TadsStrictTests(StrictBase):
         for net in settings.NETWORKS:
             new, errors = settings.validate_patch({"networks": {net: {"allow_client_reward": True}}}, await engine.get_config(force=True))
             self.assertTrue(errors, net)
-        status, out = await routes.h_admin_patch_config({"networks": {"tads": {"allow_client_reward": True}}})
+        status, out = await routes.h_admin_patch_config({"networks": {"monetag": {"allow_client_reward": True}}})
         self.assertEqual(status, 400)
         cfg = await engine.get_config(force=True)
-        self.assertFalse(cfg["networks"]["tads"]["allow_client_reward"])                       # the stored True is normalised away
-        self.assertFalse(settings.trust_allowed(cfg, "tads"))
-        _, errors = settings.validate_patch({"networks": {"tads": {"allow_client_reward": False}}}, cfg)
+        self.assertFalse(cfg["networks"]["monetag"]["allow_client_reward"])                    # the stored True is normalised away
+        _, errors = settings.validate_patch({"networks": {"monetag": {"allow_client_reward": False}}}, cfg)
         self.assertEqual(errors, [])                                                           # turning it OFF is fine
+        status, _ = await routes.h_admin_patch_config({"networks": {"tads": {"enabled": True}}})
+        self.assertEqual(status, 400)                                                          # removed network is unknown
 
     async def test_trust_check_holds_even_if_config_normalisation_is_bypassed(self):
         """Second, independent layer: a config object that still says allow_client_reward=True (never passed through merged())."""
         cfg = await engine.get_config(force=True)
         cfg = {**cfg, "networks": {n: dict(v, allow_client_reward=True) for n, v in cfg["networks"].items()}}
-        self.assertFalse(settings.trust_allowed(cfg, "tads"))
-        self.assertTrue(settings.trust_allowed(cfg, "monetag"))                                # postback-verified network unaffected
+        self.assertTrue(settings.trust_allowed(cfg, "monetag"))                                # postback-verified: no client trust needed
+        settings.RUNTIME["monetag_postback"] = False                                           # misconfiguration: no server proof available
+        self.assertFalse(settings.trust_allowed(cfg, "monetag"))
         settings.RUNTIME["strict"] = False                                                     # development profile honours the flag
-        self.assertTrue(settings.trust_allowed(cfg, "tads"))
+        self.assertTrue(settings.trust_allowed(cfg, "monetag"))
 
-    async def test_admin_overview_is_honest_about_tads(self):
+    async def test_admin_overview_is_honest_about_trust(self):
         out = await routes.h_admin_config()
         self.assertTrue(out["strict"])
-        self.assertEqual(out["reward_verification"], {"monetag": "server_postback", "tads": "client_attested"})
+        self.assertEqual(out["reward_verification"], {"monetag": "server_postback"})
         self.assertNotIn(SECRET, repr(out))
 
 
 class VerifyDecisionTests(unittest.TestCase):
     """verify.decide is the last line of defence."""
-    TADS = dict(network="tads", elapsed=60, client_completed=True)
+    MONETAG = dict(network="monetag", elapsed=60, client_completed=True)
 
-    def test_tads_cannot_be_server_verified_by_anything(self):
+    def test_unknown_network_is_always_denied(self):
         for strict in (True, False):
             pol = Policy(monetag_postback=True, strict=strict)
-            d = verify.decide(Facts(**self.TADS, postback_seen=True, postback_valued=True), pol, allow_client=True)
-            self.assertNotEqual(d.trust, settings.SERVER_POSTBACK, (strict, d))
-        for postback_on in (True, False):
-            settings.RUNTIME["monetag_postback"] = postback_on
-            self.assertEqual(settings.trust_for("tads"), settings.CLIENT_ATTESTED)             # no verified-Tads path exists
-        settings.RUNTIME["monetag_postback"] = False
+            d = verify.decide(Facts(network="tads", elapsed=60, client_completed=True, postback_seen=True, postback_valued=True), pol, allow_client=True)
+            self.assertEqual((d.action, d.reason), ("deny", "unknown_network"), strict)
 
     def test_strict_denies_client_attested_even_when_allowed(self):
-        d = verify.decide(Facts(**self.TADS), Policy(strict=True), allow_client=True)
+        d = verify.decide(Facts(**self.MONETAG), Policy(monetag_postback=False, strict=True), allow_client=True)
         self.assertEqual((d.action, d.reason), ("deny", "client_attested_not_allowed"))
 
-    def test_development_profile_still_grants_client_attested_tads_and_labels_it(self):
-        d = verify.decide(Facts(**self.TADS), Policy(strict=False), allow_client=True)
+    def test_development_profile_still_grants_client_attested_and_labels_it(self):
+        d = verify.decide(Facts(**self.MONETAG), Policy(monetag_postback=False, strict=False), allow_client=True)
         self.assertEqual((d.action, d.trust), ("grant", settings.CLIENT_ATTESTED))
+        d = verify.decide(Facts(**self.MONETAG), Policy(monetag_postback=False, strict=False), allow_client=False)
+        self.assertEqual((d.action, d.reason), ("deny", "client_attested_not_allowed"))
 
     def test_strict_monetag_needs_a_valued_postback(self):
         pol = Policy(monetag_postback=True, strict=True, min_seconds=0)
@@ -555,19 +549,18 @@ class VerifyDecisionTests(unittest.TestCase):
 
 
 # =============================================================== D. development profile (explicit opt-out)
-class TadsDevProfileTests(Base):
+class MonetagDevProfileTests(Base):
     """Base runs the DEVELOPMENT profile: this is the old client-attested behaviour, kept for local testing only."""
-    async def fallback_to_tads(self):
+    async def watched(self):
         a = await self.start()
-        r = await routes.h_report(self.ctx, self.body(ad_id=a["ad_id"], event="fail", reason="no_fill"), "1.1.1.1")
-        await routes.h_report(self.ctx, self.body(ad_id=r["next"]["ad_id"], event="shown"), "1.1.1.1")
-        return r["next"]
+        await routes.h_report(self.ctx, self.body(ad_id=a["ad_id"], event="shown"), "1.1.1.1")
+        return a
 
     async def claim(self, ad, sid="sid1", init=None):
         return await routes.h_done(self.ctx, {"sid": sid, "init_data": init or self.init, "ad_id": ad["ad_id"], "completed": True}, "1.1.1.1")
 
-    async def test_tads_grant_is_labelled_client_attested_and_happens_once(self):
-        n = await self.fallback_to_tads(); self.assertEqual(n["network"], "tads")
+    async def test_grant_is_labelled_client_attested_and_happens_once(self):
+        n = await self.watched(); self.assertEqual(n["network"], "monetag")
         r = await self.claim(n)
         self.assertTrue(r["ok"] and r["delivered"], r)
         self.assertEqual(self.fdb["ad_rewards"].docs[0]["trust"], "client_attested")           # never claims server verification
@@ -575,8 +568,8 @@ class TadsDevProfileTests(Base):
             self.assertFalse((await self.claim(n))["ok"])
         self.assertEqual((self.sent, len(self.fdb["ad_rewards"].docs)), (["tok1"], 1))
 
-    async def test_tads_attempt_cannot_be_claimed_from_another_session_or_user(self):
-        n = await self.fallback_to_tads()
+    async def test_attempt_cannot_be_claimed_from_another_session_or_user(self):
+        n = await self.watched()
         await self.sess.create_session("sid2", "tok1", 888, 888, 1, 1)
         r = await self.claim(n, sid="sid2", init=make_init_data(user_id=888))                  # someone else's ad_id
         self.assertFalse(r["ok"])
@@ -584,9 +577,9 @@ class TadsDevProfileTests(Base):
         self.assertFalse(r["ok"])
         self.assertEqual((self.sent, self.fdb["ad_rewards"].docs), ([], []))
 
-    async def test_tads_client_supplied_reward_ids_are_not_accepted_as_proof(self):
-        n = await self.fallback_to_tads()
-        r = await routes.h_done(self.ctx, self.body(ad_id="tads-reward-123", completed=True), "1.1.1.1")   # Tads' own adId
+    async def test_client_supplied_reward_ids_are_not_accepted_as_proof(self):
+        await self.watched()
+        r = await routes.h_done(self.ctx, self.body(ad_id="network-reward-123", completed=True), "1.1.1.1")   # an id the server never issued
         self.assertFalse(r["ok"]); self.assertEqual(self.sent, [])
 
 

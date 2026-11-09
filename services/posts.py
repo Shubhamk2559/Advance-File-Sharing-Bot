@@ -6,7 +6,6 @@ Moved here unchanged from handlers.py so there is a single source of truth:
   store_videos / rollback_items                 - store many videos for one post, undo on failure
 """
 import logging
-import random
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
@@ -31,13 +30,9 @@ def post_button(link: str) -> InlineKeyboardMarkup:
 
 
 async def resolve_link(manager, token: str) -> str:
-    """Post button ka link. POST_DIRECT_LINK=True: seedha t.me link (confirm box nahi), random active bot."""
+    """Post button ka link. POST_DIRECT_LINK=True: seedha t.me link (confirm box nahi)."""
     if POST_DIRECT_LINK and manager:
-        router = getattr(manager, "router", None)
-        u = router.pick_username() if router is not None else None          # least-loaded bot, not a random one
-        if not u:
-            names = await manager.active_usernames()
-            u = random.choice(names) if names else None
+        u = manager.username
         if u:
             if DIRECT_MINIAPP:
                 return f"https://t.me/{u}/{MINIAPP_SHORT_NAME}?startapp={token}" if MINIAPP_SHORT_NAME else f"https://t.me/{u}?startapp={token}"

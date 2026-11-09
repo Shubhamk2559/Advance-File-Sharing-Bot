@@ -5,8 +5,8 @@ import copy
 import os
 import re
 
-NETWORKS = ("monetag", "tads")
-NET_LABEL = {"monetag": "Monetag", "tads": "Tads.me"}
+NETWORKS = ("monetag",)
+NET_LABEL = {"monetag": "Monetag"}
 CLIENT_ATTESTED, SERVER_POSTBACK = "client_attested", "server_postback"
 TRUST_RANK = {CLIENT_ATTESTED: 1, SERVER_POSTBACK: 2}
 
@@ -22,7 +22,7 @@ def _int(name: str, default: int) -> int:
         return default
 
 
-SMART_ADS_ENABLED = _bool("SMART_ADS_ENABLED", True)   # production default: Monetag + Tads gate ON (set false for the old Monetag-only flow)
+SMART_ADS_ENABLED = _bool("SMART_ADS_ENABLED", True)   # production default: Monetag ad gate ON (set false for the old Monetag-only flow)
 ADS_ADMIN_TOKEN = os.getenv("ADS_ADMIN_TOKEN", "").strip() or os.getenv("MONETAG_ADMIN_TOKEN", "").strip()
 ADS_OPT_INTERVAL = max(60, _int("ADS_OPT_INTERVAL", 300))
 ADS_UNSHOWN_LOCK_SECONDS = _int("ADS_UNSHOWN_LOCK_SECONDS", 25)    # attempt that never displayed frees the user slot
@@ -36,32 +36,28 @@ ATTEMPT_MAX_AGE = max(30, _int("AD_ATTEMPT_MAX_AGE", 600))         # an ad attem
 # moment the postback arrives (instead of the app polling every ~4 s). 0 = off. Must stay below the client timeout (SAPI_TIMEOUT_MS).
 VERIFY_LONGPOLL = max(0.0, min(15.0, float(os.getenv("VERIFY_LONGPOLL_SECONDS", "6") or 0)))
 
-TADS_WIDGET_ID = os.getenv("TADS_WIDGET_ID", "").strip()
-TADS_SDK_URL = os.getenv("TADS_SDK_URL", "https://w.tads.me/widget.js").strip()
-TADS_DEBUG = _bool("TADS_DEBUG", False)
-# Tads documents only browser callbacks (no postback), so its reward is "client attested". The OWNER decides whether that is
-# good enough to unlock a file: TADS_ALLOW_CLIENT_REWARD=true (default) lets Tads.me serve ads and unlock files in production too
-# (Monetag stays server-verified by postback). Set it to false to go back to "Monetag only".
-TADS_ALLOW_CLIENT_REWARD = _bool("TADS_ALLOW_CLIENT_REWARD", True)
-
 # ---- Ad gate: retries + ad-blocker check + "no ad available" grace ----
-GATE_ROUNDS = max(1, min(5, _int("GATE_ROUNDS", 3)))                 # full Monetag->Tads rounds before giving up
+GATE_ROUNDS = max(1, min(5, _int("GATE_ROUNDS", 3)))                 # Monetag rounds before giving up
 GATE_GRACE = _bool("GATE_GRACE", True)                               # no ad after all rounds AND no ad-blocker => deliver the file
 GATE_GRACE_REASONS = frozenset(x.strip() for x in os.getenv("GATE_GRACE_REASONS", "no_fill,timeout").split(",") if x.strip())
 GATE_MIN_TOTAL_SECONDS = _int("GATE_MIN_TOTAL_SECONDS", 8)          # grace only this long after the first ad attempt (no instant forged "no ad")
 GATE_CHALLENGE_TTL = _int("GATE_CHALLENGE_TTL", 90)                  # seconds a solved ad-blocker challenge stays valid
 GATE_GRACE_MAX_PER_HOUR = _int("GATE_GRACE_MAX_PER_HOUR", 20)        # per user, abuse cap
-GATE_PROBE_TADS = _bool("GATE_PROBE_TADS", True)                     # treat an unreachable Tads host as a blocker
+# Hosts that DNS ad-blockers (AdGuard DNS, NextDNS, Private DNS, Pi-hole) block almost without exception. Unreachable = blocker.
+# Comma separated https URLs; empty = off. Set to empty if your users are in a region where Google hosts are unreachable.
+GATE_EXTRA_PROBES = tuple(u.strip() for u in os.getenv(
+    "GATE_EXTRA_PROBES", "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js,https://googleads.g.doubleclick.net/pagead/id"
+).split(",") if u.strip().startswith("https://"))
 
 # Filled by routes.register() from the real config.py (kept out of here so tests need no env).
 # "strict" defaults to True (fail closed). routes.register() sets it from the Policy; tests that exercise the development
 # profile (client-attested rewards) say so explicitly.
 RUNTIME = {"monetag_postback": False, "strict": True}
 
-_ID_RE = {"tads": re.compile(r"^[A-Za-z0-9_-]{1,64}$")}
+_ID_RE: dict = {}   # per-network unit-id validators (none needed for Monetag)
 
 DEFAULT_CONFIG = {
-    "mode": "priority",                 # priority = Monetag first, Tads fallback (default) | auto = performance-based | manual = forced first pick
+    "mode": "priority",                 # priority = fixed network order (default) | auto = performance-based | manual = forced first pick
     "strategy": "thompson",             # auto mode: thompson = maximise expected earnings (bandit) | weighted = classic score blend
     "manual_network": None,
     "priority": list(NETWORKS),
@@ -69,7 +65,6 @@ DEFAULT_CONFIG = {
     "max_attempts": 3,                  # attempts per user request (each only if the previous never displayed an ad)
     "networks": {
         "monetag": {"enabled": True, "allow_client_reward": True, "unit_id": None, "ecpm_usd": None},     # legacy behaviour preserved
-        "tads": {"enabled": bool(TADS_WIDGET_ID), "allow_client_reward": TADS_ALLOW_CLIENT_REWARD, "unit_id": None, "ecpm_usd": None},
     },
     "optimization": {
         "window_days": 7, "recent_hours": 24, "min_requests": 100, "min_revenue_impressions": 100,
@@ -100,14 +95,15 @@ def merged(stored: dict | None) -> dict:
     for k in ("mode", "strategy", "manual_network", "fallback_enabled", "max_attempts"):
         if k in s:
             cfg[k] = s[k]
+    if cfg["manual_network"] not in NETWORKS:       # e.g. an old stored value naming a network that no longer exists
+        cfg["manual_network"] = None
     if isinstance(s.get("priority"), list) and sorted(s["priority"]) == sorted(NETWORKS):
         cfg["priority"] = list(s["priority"])
     for n in NETWORKS:
         cfg["networks"][n].update({k: v for k, v in (s.get("networks", {}).get(n) or {}).items() if k in cfg["networks"][n]})
         if RUNTIME["strict"]:
-            # strict mode never accepts client-only rewards, except Tads.me where the env flag is the owner's switch
-            # (it also overrides an old stored "false" that earlier versions wrote while Tads was blocked)
-            cfg["networks"][n]["allow_client_reward"] = bool(n == "tads" and TADS_ALLOW_CLIENT_REWARD)
+            # strict mode never accepts client-only rewards
+            cfg["networks"][n]["allow_client_reward"] = False
     opt = s.get("optimization") or {}
     cfg["optimization"].update({k: v for k, v in opt.items() if k in cfg["optimization"] and k != "weights"})
     if isinstance(opt.get("weights"), dict):
@@ -116,11 +112,10 @@ def merged(stored: dict | None) -> dict:
 
 
 def unit_id(cfg: dict, net: str) -> str | None:
-    """Public identifier (Tads widgetId). DB override wins over env. Not a secret."""
+    """Public identifier of the ad unit. Not a secret."""
     if net == "monetag":
         return "zone"
-    v = cfg["networks"][net].get("unit_id") or TADS_WIDGET_ID
-    return v or None
+    return cfg["networks"][net].get("unit_id") or None
 
 
 def is_configured(cfg: dict, net: str) -> bool:
@@ -130,14 +125,12 @@ def is_configured(cfg: dict, net: str) -> bool:
 def trust_for(net: str) -> str:
     if net == "monetag":
         return SERVER_POSTBACK if RUNTIME["monetag_postback"] else CLIENT_ATTESTED
-    return CLIENT_ATTESTED          # tads: only client callbacks are documented
+    return CLIENT_ATTESTED
 
 
 def trust_allowed(cfg: dict, net: str) -> bool:
     if trust_for(net) != CLIENT_ATTESTED:
         return True
-    if net == "tads":                                   # owner opt-in (env) works in production as well
-        return TADS_ALLOW_CLIENT_REWARD and bool(cfg["networks"][net]["allow_client_reward"])
     return (not RUNTIME["strict"]) and bool(cfg["networks"][net]["allow_client_reward"])
 
 
@@ -194,7 +187,7 @@ def validate_patch(patch: dict, current: dict) -> tuple[dict, list]:
             errors.append(f"unknown network: {n}")
             continue
         for k, v in nv.items():
-            if k == "allow_client_reward" and v is True and RUNTIME["strict"] and not (n == "tads" and TADS_ALLOW_CLIENT_REWARD):
+            if k == "allow_client_reward" and v is True and RUNTIME["strict"]:
                 errors.append(f"networks.{n}.allow_client_reward: not allowed in strict mode (browser-only rewards can't be verified)")
             elif k in ("enabled", "allow_client_reward") and isinstance(v, bool):
                 new["networks"][n][k] = v
@@ -237,16 +230,10 @@ def validate_patch(patch: dict, current: dict) -> tuple[dict, list]:
                 else:
                     errors.append(f"optimization.{k}: unknown")
     # cross-field checks on the resulting config
-    if new["networks"]["tads"]["enabled"] and not is_configured(new, "tads"):
-        errors.append(f"{NET_LABEL['tads']} cannot be enabled: set its widget ID first")
     if new["mode"] == "manual" and not new["manual_network"]:
         errors.append("manual mode needs manual_network")
     # Never let the admin switch off the LAST network that can unlock files: every user would then get
     # "No ad provider is available". (Fixing an already-broken config is still allowed.)
     if servable_networks(current) and not servable_networks(new):
-        if RUNTIME["strict"]:
-            errors.append("cannot switch off the last usable ad network: Tads.me is not usable (set TADS_WIDGET_ID and "
-                          "TADS_ALLOW_CLIENT_REWARD=true, and enable it), so with Monetag off no user can get a file. Keep Monetag enabled.")
-        else:
-            errors.append("cannot switch off the last usable ad network: no other network would be left to serve ads.")
+        errors.append("cannot switch off the last usable ad network: no other network would be left to serve ads.")
     return (current if errors else new), errors

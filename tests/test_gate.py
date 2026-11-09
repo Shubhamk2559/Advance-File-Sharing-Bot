@@ -1,4 +1,4 @@
-"""Ad gate: Monetag -> Tads rounds, server-verified ad-blocker challenge, no-ad grace. Real service/store/gate/routes handlers
+"""Ad gate: Monetag rounds, server-verified ad-blocker challenge, no-ad grace. Real service/store/gate/routes handlers
 against the in-memory Mongo fake."""
 import re
 import time
@@ -27,7 +27,7 @@ class GateBase(Base):
         await super().asyncTearDown()
 
     async def fail_round(self, reasons=("no_fill", "no_fill"), shown_first=False):
-        """One full round: Monetag fails, Tads is handed over, Tads fails. Returns the final report."""
+        """One full round: Monetag (the only network) fails and the round is exhausted. Returns the final report."""
         ad = await self.start()
         assert ad["ok"], ad
         i = 0
@@ -69,19 +69,17 @@ class GateBase(Base):
 
 class FlowOrderTests(GateBase):
     async def test_defaults_are_production_gate(self):
-        self.assertEqual(settings.DEFAULT_CONFIG["mode"], "priority")            # Monetag first, Tads fallback
+        self.assertEqual(settings.DEFAULT_CONFIG["mode"], "priority")            # Monetag only
         self.assertTrue(settings.SMART_ADS_ENABLED)
         self.assertEqual(settings.GATE_ROUNDS, 3)
 
-    async def test_round_is_monetag_then_tads_and_counts_server_side(self):
+    async def test_round_is_monetag_only_and_counts_server_side(self):
         a = await self.start()
         self.assertEqual(a["network"], "monetag")
         rep = await routes.h_report(self.ctx, self.body(ad_id=a["ad_id"], event="fail", reason="no_fill"), IP)
-        self.assertEqual(rep["next"]["network"], "tads")
-        rep = await routes.h_report(self.ctx, self.body(ad_id=rep["next"]["ad_id"], event="fail", reason="no_fill"), IP)
-        self.assertTrue(rep["exhausted"])
+        self.assertTrue(rep["exhausted"]); self.assertNotIn("next", rep)
         atts = (await routes.store.attempts_for_sid("sid1"))
-        self.assertEqual(sorted((x["round"], x["network"]) for x in atts), [(1, "monetag"), (1, "tads")])
+        self.assertEqual(sorted((x["round"], x["network"]) for x in atts), [(1, "monetag")])
         self.assertTrue(any(x.get("round_exhausted") for x in atts))
         await self.fail_round()
         self.assertEqual(gate.clean_rounds(await routes.store.attempts_for_sid("sid1"))[0], 2)
@@ -119,7 +117,7 @@ class GraceTests(GateBase):
 
     async def test_blocked_sdk_round_never_counts_as_no_ad(self):
         await self.fail_round(); await self.fail_round()
-        await self.fail_round(reasons=("no_fill", "blocked"))                    # Tads script blocked in round 3
+        await self.fail_round(reasons=("blocked",))                              # Monetag script blocked in round 3
         cid, proofs = await self.solve()
         r = await self.grace(cid, proofs)
         self.assertEqual((r["ok"], r["code"]), (False, "rounds"))

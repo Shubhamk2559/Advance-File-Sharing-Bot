@@ -1,16 +1,23 @@
-# Multi-bot sticky routing
+# Auto Poster merged into the file bot
+* New package `autoposter/` (shares the bot token, OWNER_ID and the MongoDB connection; collections `ap_*`; migration v6 adds their indexes). Menu button **📅 Auto Poster**.
+* **📥 Channel -> Posts** (`autoposter/importer.py`): captioned video = post, caption-less videos below it = files behind the link; POST_CAPTION + button; queued and scheduled to the selected channel. Idempotent re-runs, reuse across channels.
+* Background work runs as supervised asyncio loops (`ap_scheduler`, `ap_housekeeping`, `ap_daily`, `ap_archive`) - no JobQueue / new dependency. Webhook `allowed_updates` now also include `channel_post`, `my_chat_member`, `chat_join_request` (only when `AP_ENABLED`).
+* Fix: `db.add_channel_post` was called by the owner menu's "Post to channel" button but never defined. Added (capped list) + `db.file_by_source`.
+* PRIMARY / BACKUP / vault chats are never offered or registered as posting targets. `/start` also cancels an open auto-poster prompt.
+* Tests: `tests/test_autoposter.py` (+ `ap_harness.py`, `ap_stubs/`); migration-count expectations updated to 6.
 
-* New `routing/` package: per-bot heartbeat registry (`route_bots`), per-user assignment (`route_assign`, compare-and-set on `ver`), pure policy (power-of-two-choices least-loaded,
-  sticky while active, rebalance after `STICKY_TTL` idle, failover on dead/flood-waiting bots), signed browser cookie for the `/f/<token>` gateway.
-* `/f/<token>` now picks the bot in memory (no database round trip); channel posts use the least-loaded bot instead of a random one (`services/posts.py`).
-* `/start <token>`: arrival decision per Telegram user (`handlers._maybe_move`); menu taps / text slide the sticky window; direct Mini App launch pins the user (`ads/routes._bootstrap`).
-* Telegram flood wait (`RetryAfter`) on a bot => no NEW users on it until the wait is over (`delivery.py`).
-* Migration 6 (`routing_indexes`), `/admin/health` -> `routing`, env: `ROUTING_ENABLED`, `STICKY_TTL`, `BOT_CAPACITY`, `INSTANCE_ID`, `ROUTER_*` (see KOYEB.md "Multi-bot").
-* Tests: `tests/test_routing.py` (policy, cookie, router over a shared fake MongoDB, fleet simulations) and `tests/test_routing_wiring.py` (real handlers.py / main.py).
-  Existing tests updated only where they asserted the old migration count (5 -> 6) and the old background-task list.
+---
+# Changes - Faster Mini App loading
+* `miniapp.html`: the ad-host probes no longer wait for the slowest host (was up to 7 s): a failed host answers "blocked" at once, all-OK answers "ok" at once, slow probes are capped at 2.5 s (a slow probe was never counted as blocked, so the gate rules are unchanged). The 250 ms cosmetic check now runs in parallel with the probes. The "Sent!" screen closes after 0.7 s instead of 1.6 s.
+* `main.py` + `miniapp.html`: `<link rel="preload">` hints for `/assets/sa.js`, `/assets/sg.js` and the Monetag SDK are placed before `telegram-web-app.js`, so they download while Telegram's script is still loading.
+* `ads/service.py`: `/api/smart/start` runs its independent DB writes together (chain + round counter, attempt bookkeeping) instead of one after another; the postback long-poll re-checks every 0.2 s instead of 0.4 s, so the file is released sooner after the postback lands.
+
+# Changes - Tads.me removed
+* Tads.me network removed everywhere: `ads/settings.py` (`NETWORKS=("monetag",)`, no `TADS_*` / `GATE_PROBE_TADS` env), `ads/verify.py`, `ads/service.py`, `ads/security.py`, `ads/routes.py`, `ads/report.py`, `ads/adapters.js` (tads adapter), `ads/admin_ads.html`, `main.py` (probe host, health flag), env example, README, KOYEB.md.
+* Old stored configs are safe: a stored `networks.tads` block is ignored, a stored `priority` listing tads falls back to the default, and a stored `manual_network: tads` is reset to null.
 
 # Batch 4 - "No ad provider" + "couldn't confirm the ad view"
-* `ads/settings.py`: admin can no longer switch off the LAST usable ad network (in production that is Monetag; Tads.me is never served there) - clear error instead of every user getting "No ad provider is available".
+* `ads/settings.py`: admin can no longer switch off the LAST usable ad network (in production that is Monetag) - clear error instead of every user getting "No ad provider is available".
 * `ads/service.py`, `ads/postback.py`: if users finish Monetag ads but NO postback has reached the server since startup, a `postback_never_received` warning is logged and ONE owner alert is sent (after 3 cases). `/admin/health` metrics get `postback.last_ok_at` and `ads.unverified`.
 * **Faster verification**: `done()` now long-polls (`VERIFY_LONGPOLL_SECONDS`, default 6): the server holds the request and answers the moment Monetag's postback lands; app polls every ~1 s (was ~4 s). Files: `ads/service.py`, `ads/settings.py`, `ads/routes.py`, `ads/verify.py`, `ads/adapters.js`, `main.py`, `_.env.example`.
 * Tests: `tests/test_batch4.py`. Root cause of "couldn't confirm" is the Monetag zone Postback URL (KOYEB.md Step 1), not code.
@@ -42,16 +49,15 @@
   **Before deploying, set the Monetag postback URL + `MONETAG_POSTBACK_SECRET` (KOYEB.md step 1), or the app won't boot / nobody gets files.**
 * **Monetag postback hardened** (`ads/postback.py`, `monetag_store.record_postback`): constant-time secret, failed-secret rate limit, strict payload validation, `ymid` must be issued by us and bound to the same user (`telegram_id`), zone and a live session; attempt/session expiry; settled/late postbacks rejected; exact repeats idempotent. Attempts now store `user_id`.
 * **Reward path**: `service.done` rejects expired attempts and postback records bound to another user/zone; sessions are expiry-checked explicitly (not only by Mongo's TTL reaper).
-* **Tads.me**: no documented server-side verification => in strict mode it is never served and its browser callback can never unlock a file (`verify.decide`, `settings.trust_allowed`, config normalisation, admin patch rejection). Still available, labelled `client_attested`, in the development profile.
 * Tests: `tests/test_ad_security.py`, `tests/test_main_wiring.py` (runs the real `main.py` with stubs), 2 new JS tests. Existing fixtures declare the development profile explicitly.
 
 ---
-# Changes - Ad gate (Monetag + Tads.me)
-* **Smart ads ON by default**, `mode=priority` (Monetag first, Tads fallback), Tads auto-enabled when `TADS_WIDGET_ID` is set, `TADS_ALLOW_CLIENT_REWARD` default true.
-* **3 rounds** (`GATE_ROUNDS`) of Monetag->Tads; server counts rounds (`sessions.smart_round`, `ad_requests.round/chain_len/round_exhausted`).
+# Changes - Ad gate (Monetag)
+* **Smart ads ON by default**, `mode=priority` (Monetag).
+* **3 rounds** (`GATE_ROUNDS`) of Monetag; server counts rounds (`sessions.smart_round`, `ad_requests.round/chain_len/round_exhausted`).
 * **No ad after all rounds => server-verified ad-blocker challenge => file (grace) or "Ad blocker detected"**: new `ads/gate.py`, `ads/guard.js`,
   routes `POST /api/gate/challenge`, `POST /api/smart/grace`, bait routes, neutral asset paths `/assets/sa.js` + `/assets/sg.js`. See README "Ad gate".
-* Ad SDK that loads but defines no global => classified `blocked` (was `timeout`); `runChain` reports `sawBlocked`; Tads host is probed with the Monetag host.
+* Ad SDK that loads but defines no global => classified `blocked` (was `timeout`); `runChain` reports `sawBlocked`.
 * New collections `ad_gate` (TTL 1h) and `ad_grace`; migration updated (idempotent).
 * Dedicated generous rate limiters for gate/bait endpoints (shared carrier-NAT IPs).
 * Tests: `tests/test_gate.py` (29 cases, mutation-checked), `tests/guard.test.js`; `run_tests.sh` runs all `tests/*.test.js`.

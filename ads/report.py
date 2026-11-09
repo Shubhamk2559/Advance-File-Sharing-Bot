@@ -129,7 +129,6 @@ async def build(days: int = 7) -> dict:
         "notes": [
             "Confirmed revenue/eCPM = owner-entered dashboard revenue divided by OUR verified impressions on the same days.",
             "Estimated revenue (Monetag only) = sum of postback estimated_price. It is an estimate, not a payout.",
-            "Tads exposes no documented reporting API: their revenue is 'unavailable' until you enter it.",
         ],
     }
 

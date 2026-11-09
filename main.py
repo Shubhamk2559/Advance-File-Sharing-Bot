@@ -6,7 +6,6 @@ import json
 import logging
 import math
 import os
-import random
 import re
 import secrets
 import time
@@ -51,7 +50,6 @@ from config import (
     MONETAG_WINDOW_DAYS,
     MONETAG_ZONES,
     POSTBACK_WAIT_SECONDS,
-    ROUTER_CFG,
     RT,
     WEBHOOK_SECRET,
 )
@@ -256,20 +254,10 @@ async def permanent_link(token: str, request: Request):
         return _redirect_page(message="Too many requests. Please wait a minute and try again.", status=429)
     if not TOKEN_RE.match(token):
         return _redirect_page(message="This link doesn't look right.", status=404)
-    router = getattr(manager, "router", None)
-    if router is not None:
-        # Sticky + least-loaded, pure memory (no database round trip). The signed cookie only remembers the last bot for this browser.
-        bot, reason, hint = router.gateway(request.cookies.get(ROUTER_CFG.cookie_name))
-        observability.METRICS.inc(f"route.gateway.{reason}")
-        if bot is None:
-            return _redirect_page(message="Service is unavailable right now. Please try again shortly.", status=503)
-        resp = _redirect_page(_telegram_target(bot.username, token))
-        resp.set_cookie(ROUTER_CFG.cookie_name, hint, max_age=int(ROUTER_CFG.sticky_ttl), httponly=True, secure=True, samesite="lax", path="/")
-        return resp
-    names = await manager.active_usernames()
-    if not names:
+    username = manager.username
+    if not username:
         return _redirect_page(message="Service is unavailable right now. Please try again shortly.", status=503)
-    return _redirect_page(_telegram_target(random.choice(names), token))
+    return _redirect_page(_telegram_target(username, token))
 
 
 # ===================== WORKER only: Mini App =====================
@@ -305,13 +293,13 @@ _CFG = json.dumps(
         "grace": bool(NOFILL_GRACE and not ads_settings.SMART_ADS_ENABLED),
         "smart": ads_settings.SMART_ADS_ENABLED,   # multi-network flow (default off = legacy flow)
         "sdk": engine.sdk_url(_DEFAULT_ZONE),
-        # Ad gate: how many Monetag->Tads rounds before the ad-blocker check, and whether "no ad + clean device" delivers the file
+        # Ad gate: how many Monetag rounds before the ad-blocker check, and whether "no ad + clean device" delivers the file
         "gate": {"rounds": ads_settings.GATE_ROUNDS, "grace": bool(ads_settings.GATE_GRACE)},
         # Ad-blocker / Private DNS check: agar inme se koi host reach na ho to user ko "DNS/AdBlock off karo" screen dikhti hai
         "probe": sorted(
             {engine.sdk_url(z) for z in engine.ZONES}
             | {engine.sdk_url(_DEFAULT_ZONE)}
-            | ({ads_settings.TADS_SDK_URL} if (ads_settings.SMART_ADS_ENABLED and ads_settings.TADS_WIDGET_ID and ads_settings.GATE_PROBE_TADS and ads_settings.TADS_ALLOW_CLIENT_REWARD) else set())
+            | (set(ads_settings.GATE_EXTRA_PROBES) if ads_settings.SMART_ADS_ENABLED else set())
         ),
     }
 ).replace("</", "<\\/")
@@ -335,12 +323,18 @@ _TAG = "".join(
     f'onerror="window.__sdkErr=1"></script>'
 )
 
+# Resource hints go BEFORE telegram-web-app.js (which blocks parsing) so the browser fetches these while it waits for it.
+_PRELOAD = "".join(
+    [f'<link rel="preload" as="script" href="{p}">' for p in ("/assets/sa.js", "/assets/sg.js")] if ads_settings.SMART_ADS_ENABLED else []
+) + f'<link rel="preload" as="script" href="{html.escape(engine.sdk_url(_DEFAULT_ZONE), quote=True)}">'
+
 _HTML = (
     Path(__file__)
     .with_name("miniapp.html")
     .read_text(encoding="utf-8")
     .replace("__CFG__", _CFG)
     .replace("<!--AD_TAG-->", _TAG)
+    .replace("<!--PRELOAD-->", _PRELOAD)
 )
 
 @app.get("/app", response_class=HTMLResponse)
@@ -376,7 +370,7 @@ def _country(request: Request):
     c = (request.headers.get(MONETAG_GEO_HEADER) or "").strip().upper()
     return c if re.fullmatch(r"[A-Z]{2}", c) and c not in ("XX", "T1") else None
 
-# ---- Smart multi-network rotation (Monetag + Tads). Only mounted when SMART_ADS_ENABLED=true ----
+# ---- Smart multi-network rotation (Monetag). Only mounted when SMART_ADS_ENABLED=true ----
 if ads_settings.SMART_ADS_ENABLED:
     ads_routes.register(
         app,
@@ -691,8 +685,7 @@ async def admin_health(request: Request, authorization: str | None = Header(defa
                          "ratelimit_store": {"degraded": limiter.degraded, **{k: limiter.stats[k] for k in
                                              ("store_errors", "degraded_decisions", "last_error")}}},
         "background_tasks": manager.tasks.snapshot(),
-        "routing": manager.router.snapshot() if getattr(manager, "router", None) is not None else None,
         **observability.diagnostics(),
         "configured": {"monetag_postback": bool(MONETAG_POSTBACK_SECRET), "ads_admin": bool(ads_settings.ADS_ADMIN_TOKEN),
-                       "monetag_admin": bool(MONETAG_ADMIN_TOKEN), "tads_widget": bool(ads_settings.TADS_WIDGET_ID)},
+                       "monetag_admin": bool(MONETAG_ADMIN_TOKEN)},
     }, headers={"Cache-Control": "no-store"})

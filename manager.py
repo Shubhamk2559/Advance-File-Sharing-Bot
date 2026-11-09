@@ -13,11 +13,10 @@ import health
 import migrator
 import monetag_engine
 import observability as obs
+from autoposter import integration as autopost
 from ads import engine as ads_engine, slog
-from config import (AUTO_DELETE_SECONDS, BASE_URL, INSTANCE_ID, MAIN_BOT_TOKEN, OWNER_ID, ROUTER_CFG, ROUTING_ENABLED, RT, SESSION_TTL,
-                    WEBHOOK_SECRET)
+from config import AUTO_DELETE_SECONDS, BASE_URL, MAIN_BOT_TOKEN, OWNER_ID, RT, SESSION_TTL, WEBHOOK_SECRET
 from migrations import registry as migration_registry
-from routing.router import Router
 
 log = logging.getLogger("manager")
 
@@ -32,7 +31,7 @@ async def run_startup_migrations() -> "migrator.Result":
 
 
 class BotManager:
-    """Runs the single bot (MAIN_BOT_TOKEN) plus the supervised background loops.
+    """Runs the one bot (MAIN_BOT_TOKEN) plus the supervised background loops.
 
     start() returns immediately; the real startup (migrations -> Telegram init -> webhook -> background tasks) runs as ONE supervised task,
     so the HTTP server answers the liveness probe while it works and /readyz says when traffic may flow. A permanent failure (failed
@@ -42,7 +41,6 @@ class BotManager:
     def __init__(self, *, lifecycle: health.Lifecycle | None = None, alerts: obs.AlertManager | None = None,
                  tasks: health.TaskSupervisor | None = None):
         self.main: Application | None = None
-        self.router: Router | None = None           # multi-bot sticky router (None = ROUTING_ENABLED=false / not started yet)
         self.lifecycle = lifecycle or health.LIFECYCLE
         self.alerts = alerts or obs.ALERTS
         self.tasks = tasks or health.TaskSupervisor(on_crash=self._on_task_crash)
@@ -84,6 +82,7 @@ class BotManager:
         app = Application.builder().token(MAIN_BOT_TOKEN).updater(None).concurrent_updates(True).build()
         app.bot_data["manager"] = self
         app.bot_data["bot_id"] = "main"
+        autopost.attach(self)                              # auto-poster: shares this MongoDB connection (collections ap_*)
         handlers.register_main_handlers(app)
         app.add_error_handler(self.on_bot_error)
         return app
@@ -102,9 +101,6 @@ class BotManager:
             lc.set_phase(phase)
             app = await health.retry_until(self._init_app, timeout=RT.startup_timeout, what="telegram_init")
             self.main = app
-            if ROUTING_ENABLED:
-                self.router = Router(lambda name: db._db[name], ROUTER_CFG, bot_id=str(app.bot.id), username=app.bot.username or "",
-                                     instance=INSTANCE_ID, secret=hashlib.sha256(f"{WEBHOOK_SECRET}:route".encode()).digest())
             await app.start()
             try:  # koi slash-command menu nahi: sab kuch buttons me
                 await app.bot.delete_my_commands()
@@ -125,8 +121,6 @@ class BotManager:
 
             phase = "tasks"
             lc.set_phase(phase)
-            if self.router is not None:
-                await self.router.start()          # publish this bot + load the others before traffic flows (never fatal)
             self._start_background_tasks()
         except asyncio.CancelledError:
             raise
@@ -146,9 +140,7 @@ class BotManager:
     def _start_background_tasks(self) -> None:
         loops = [("cleanup", self.cleanup_loop), ("monetag_optimizer", monetag_engine.optimizer_loop),
                  ("ads_optimizer", ads_engine.loop), ("db_monitor", self._db_monitor),
-                 ("webhook_monitor", self._webhook_monitor)]
-        if self.router is not None:
-            loops += [("router_heartbeat", self.router.heartbeat_loop), ("router_refresh", self.router.refresh_loop)]
+                 ("webhook_monitor", self._webhook_monitor)] + autopost.loops(self)
         for name, factory in loops:
             self.tasks.start(name, factory)               # idempotent: a duplicate start is ignored and logged
 
@@ -171,7 +163,7 @@ class BotManager:
 
     # ------------------------------------------------------------------ webhook
     async def _register_webhook_once(self) -> None:
-        await self.main.bot.set_webhook(url=self.webhook_url, secret_token=self.secret, allowed_updates=["message", "callback_query"])
+        await self.main.bot.set_webhook(url=self.webhook_url, secret_token=self.secret, allowed_updates=autopost.allowed_updates())
         slog.event("webhook_registered")
 
     async def _webhook_failed(self, what: str, e: BaseException) -> None:
@@ -261,11 +253,10 @@ class BotManager:
         """Backwards-compatible entry point (delivery.py): de-duplicated per key (6 h), shared hourly cap, redacted."""
         await self.alerts.alert(key, text, severity="warning", cooldown=6 * 3600)
 
-    async def active_usernames(self) -> list[str]:
-        """Bots that may take new users: every live bot of the fleet (heartbeat registry), this one when routing is off / not started."""
-        if self.router is not None:
-            return self.router.usernames()
-        return [self.main.bot.username]
+    @property
+    def username(self) -> str | None:
+        """Username of the bot (None until Telegram init has finished)."""
+        return self.main.bot.username if self.main is not None else None
 
     # ------------------------------------------------------------------ shutdown
     async def stop(self) -> None:
@@ -320,7 +311,7 @@ class BotManager:
         for d in await db.due_deletes(now, 100):
             overdue = now - d["delete_at"] > 3600
             if d["bot_id"] != self.main.bot.id:
-                if overdue:      # purane (hata diye gaye) bots ke entries
+                if overdue:      # entries of an old / different bot token
                     await db.remove_delete(d["_id"])
                 continue
             try:

@@ -25,13 +25,6 @@ class LastNetworkGuard(unittest.TestCase):
         self.assertIn("last usable ad network", errs[0])
         self.assertIs(new, cur)                                   # nothing applied
 
-    def test_can_disable_when_another_network_remains(self):
-        cur = _cfg(False)
-        cur["networks"]["tads"].update(enabled=True, allow_client_reward=True, unit_id="abc123")
-        new, errs = settings.validate_patch({"networks": {"monetag": {"enabled": False}}}, cur)
-        self.assertEqual(errs, [])
-        self.assertFalse(new["networks"]["monetag"]["enabled"])
-
     def test_already_broken_config_can_still_be_fixed(self):
         cur = _cfg(True)
         cur["networks"]["monetag"]["enabled"] = False

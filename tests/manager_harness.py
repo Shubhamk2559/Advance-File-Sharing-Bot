@@ -127,6 +127,9 @@ async def _due(now, limit=100): return []
 
 mod("db", _db=fdb, ping=_ping, close=_close, due_deletes=_due, remove_delete=None)
 mod("handlers", register_main_handlers=lambda app: count("register_handlers"))
+mod("autoposter")
+mod("autoposter.integration", attach=lambda m: count("autopost_attach"), allowed_updates=lambda: ["message", "callback_query", "channel_post", "my_chat_member", "chat_join_request"],
+    loops=lambda m: [])
 
 
 async def _noop_loop(): count("noop_loop_started")

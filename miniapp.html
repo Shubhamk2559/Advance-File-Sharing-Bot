@@ -6,6 +6,7 @@
 <meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#0e0814">
 <title>File</title>
+<!--PRELOAD-->
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <!--AD_TAG-->
 <style>
@@ -243,11 +244,21 @@ function probe(url, ms, cross) {
     );
   });
 }
-async function adsStatus() {                          // "ok" | "blocked" | "offline"
+// "ok" | "blocked" | "offline". Answers as soon as the result is known: a failed host => blocked right away, all fine => ok.
+// A slow (timed-out) probe was never counted as blocked, so the caps are short: nobody waits 7 s for a sluggish ad host.
+function adsStatus() {
   const hosts = CFG.probe || [];
-  const res = await Promise.all([probe("/api/ping", 7000, false)].concat(hosts.map((u) => probe(u, 7000, true))));
-  if (res[0] === "fail") return "offline";
-  return res.slice(1).indexOf("fail") >= 0 ? "blocked" : "ok";
+  return new Promise((resolve) => {
+    let pending = hosts.length + 1, ping = null, hostFailed = false, done = false;
+    const fin = (v) => { if (!done) { done = true; resolve(v); } };
+    const settle = () => {
+      if (ping === "fail") return fin("offline");           // our own server unreachable wins over "blocked" (same as before)
+      if (hostFailed && ping !== null) return fin("blocked");
+      if (pending === 0) fin("ok");
+    };
+    probe("/api/ping", 4000, false).then((r) => { ping = r; pending--; settle(); });
+    hosts.forEach((u) => probe(u, 2500, true).then((r) => { if (r === "fail") hostFailed = true; pending--; settle(); }));
+  });
 }
 
 let watchT = null, watchBusy = false;
@@ -347,7 +358,7 @@ async function tryGrace() {
   setStatus("Sent! Check your chat.");
   setSub("This window will close on its own");
   $("progress").textContent = "";
-  setTimeout(() => tg.close(), 1600);
+  setTimeout(() => tg.close(), 700);
   return true;
 }
 function failReason(e) {
@@ -600,9 +611,13 @@ function loadScriptTag(src) {
     document.head.appendChild(sc);
   });
 }
-function loadSmartLib() {              // adapters + guard are fetched only when needed (neutral paths: ad blockers block "/ads/")
+let _libP = null;
+function loadSmartLib() {              // adapters + guard (neutral paths: ad blockers block "/ads/"); preloaded in <head>, loaded once
   if (window.SmartAds && window.SmartGuard) { G = window.SmartGuard; return Promise.resolve(window.SmartAds); }
-  return Promise.all([loadScriptTag("/assets/sa.js"), loadScriptTag("/assets/sg.js")]).then(() => { G = window.SmartGuard; return window.SmartAds; });
+  if (!_libP) _libP = Promise.all([loadScriptTag("/assets/sa.js"), loadScriptTag("/assets/sg.js")])
+    .then(() => { G = window.SmartGuard; return window.SmartAds; })
+    .catch((e) => { _libP = null; throw e; });
+  return _libP;
 }
 function showSent() {
   setIcon("done");
@@ -641,16 +656,17 @@ async function smartBegin(run) {
   let S;
   try { S = await loadSmartLib(); } catch (e) { if (alive()) fail("Couldn't load. Please check your connection and try again."); return; }
   // Gate: ad host unreachable => ad slot lene se pehle hi block screen (slot lock na lage)
+  const cosP = G.browserEnv(window).cosmetic();      // cosmetic filters (hidden ad containers): 250 ms check overlaps the host probes
   let st = await stP;
   if (!alive()) return;
-  if (st === "ok" && !(await G.browserEnv(window).cosmetic())) st = "blocked";      // cosmetic filters (hidden ad containers)
+  if (st === "ok" && !(await cosP)) st = "blocked";
   if (!alive()) return;
   if (st === "blocked") { showBlocked(); return; }
   if (st === "offline") { fail("No internet connection. Please try again."); return; }
 
   const adapters = S.createAdapters(S.browserEnv(window));
   let out = null;
-  const ROUNDS = Math.max(1, (CFG.gate && CFG.gate.rounds) || 3);     // each round = Monetag, then Tads.me as fallback
+  const ROUNDS = Math.max(1, (CFG.gate && CFG.gate.rounds) || 3);     // each round = one Monetag attempt chain
   const t0 = Date.now();
   for (let attempt = 0; attempt < ROUNDS; attempt++) {
     if (attempt) {

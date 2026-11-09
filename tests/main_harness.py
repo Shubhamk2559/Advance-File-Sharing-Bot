@@ -88,7 +88,7 @@ class Manager:
     async def start(self): pass
     async def stop(self): pass
     async def background_loop(self): pass
-    async def active_usernames(self): return ["bot"]
+    username = "bot"
 
 
 mod("manager", BotManager=Manager)

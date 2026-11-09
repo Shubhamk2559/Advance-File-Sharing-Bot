@@ -20,7 +20,7 @@ SECRET = "s3cr3t-Postback_0123456789abcdef"
 GOOD_ENV = {"MAIN_BOT_TOKEN": "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab", "OWNER_ID": "42", "MONGO_URI": "mongodb://user:dbpass-9876@h/x",
             "WEBHOOK_SECRET": "test-webhook-secret-0123456789", "BASE_URL": "https://example.test", "PRIMARY_CHANNEL": "-1001",
             "BACKUP_CHANNEL": "-1002", "MONETAG_POSTBACK_SECRET": SECRET}
-BASE = {"PATH": os.environ.get("PATH", ""), **GOOD_ENV, "TADS_WIDGET_ID": "13070"}
+BASE = {"PATH": os.environ.get("PATH", ""), **GOOD_ENV}
 
 import envcheck  # noqa: E402
 import health  # noqa: E402
@@ -654,12 +654,12 @@ class ManagerHarnessTests(unittest.TestCase):
         self.assertEqual(o["state"], "ready")
         count, args = o["webhook"]
         self.assertEqual(count, 1)
-        self.assertEqual(args, ["https://example.test/webhook", True, ["message", "callback_query"]])    # url, derived secret_token, allowed updates
+        self.assertEqual(args, ["https://example.test/webhook", True, ["message", "callback_query", "channel_post", "my_chat_member", "chat_join_request"]])    # url, derived secret_token, allowed updates
         self.assertEqual(o["delete_my_commands"], 1)
         self.assertTrue(o["alert_sender_ready"])
 
     def test_background_tasks_started_once_each(self):
-        self.assertEqual(self.o["tasks"], ["ads_optimizer", "cleanup", "db_monitor", "monetag_optimizer", "router_heartbeat", "router_refresh", "startup", "webhook_monitor"])
+        self.assertEqual(self.o["tasks"], ["ads_optimizer", "cleanup", "db_monitor", "monetag_optimizer", "startup", "webhook_monitor"])
 
     def test_graceful_shutdown_order_and_idempotence(self):
         o = self.o
@@ -882,8 +882,8 @@ class Batch1RegressionTests(unittest.TestCase):
         r = self.boot({"MONETAG_POSTBACK_SECRET": "short"})
         self.assertNotEqual(r.returncode, 0)
 
-    def test_tads_cannot_unlock_files_in_production_even_if_enabled_by_env(self):
-        r = self.boot({"TADS_ALLOW_CLIENT_REWARD": "true"})
+    def test_production_profile_is_strict_and_ignores_removed_tads_env(self):
+        r = self.boot({"TADS_ALLOW_CLIENT_REWARD": "true", "TADS_WIDGET_ID": "13070"})
         self.assertEqual(r.returncode, 0, r.stderr[-1500:])
         o = json.loads(r.stdout.strip().splitlines()[-1])
         self.assertTrue(o["strict"])

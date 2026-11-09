@@ -161,7 +161,7 @@ async def advance_chain(sid: str, from_idx: int) -> bool:
 
 
 async def next_round(sid: str) -> int:
-    """Each /api/smart/start is one 'round' (a Monetag->Tads chain). Server-side counter, never client supplied."""
+    """Each /api/smart/start is one 'round' (a Monetag chain). Server-side counter, never client supplied."""
     s = await _c("sessions").find_one_and_update({"sid": sid}, {"$inc": {"smart_round": 1}}, return_document=_AFTER)
     return int((s or {}).get("smart_round") or 1)
 

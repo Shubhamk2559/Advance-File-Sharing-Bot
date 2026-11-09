@@ -63,9 +63,6 @@ async def _send_item(bot, chat_id: int, item: dict, token: str, kb, manager) -> 
                         log.exception("schedule_delete failed file=%s", token)
                 return True
             except RetryAfter as e:
-                router = getattr(manager, "router", None)
-                if router is not None:
-                    router.penalize(e.retry_after)
                 await asyncio.sleep(min(e.retry_after, 5))
             except TelegramError as e:
                 observability.METRICS.inc("delivery.copy_failed")
@@ -89,7 +86,7 @@ async def send_file(bot, chat_id: int, doc: dict, manager) -> bool:
         if await _send_item(bot, chat_id, item, token, kb if last else None, manager):
             delivered += 1
         if not last:
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.15)
     if delivered:
         observability.METRICS.inc("delivery.ok")
         try:

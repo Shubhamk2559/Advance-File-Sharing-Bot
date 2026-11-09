@@ -5,8 +5,8 @@ Pure (no I/O, no import of config.py) so it is unit-testable and shared by confi
   APP_ENV=production (DEFAULT, also when unset)
       * Monetag reward verification MUST be the server-to-server postback (AD_VERIFY_MODE=postback; "legacy" is refused).
       * MONETAG_POSTBACK_SECRET is REQUIRED (>= 16 URL-safe chars). Missing/weak => the process refuses to start.
-      * strict mode: only server-verified rewards can unlock a file. Browser-only ("client_attested") rewards, which is
-        all Tads.me offers, never do, whatever the stored admin config says.
+      * strict mode: only server-verified rewards can unlock a file. Browser-only ("client_attested") rewards never
+        do, whatever the stored admin config says.
   APP_ENV=development | test
       * Legacy verification and client-attested rewards are allowed so the flow can be tried without provider accounts.
         Never use these values in production.
@@ -93,9 +93,6 @@ def resolve(env: Mapping) -> Security:
     warns = []
     if not production:
         warns.append(f"APP_ENV={app_env}: development profile. Browser-only (client-attested) rewards may unlock files. Do NOT use in production.")
-    if production and _bool(env, "TADS_ALLOW_CLIENT_REWARD", True):
-        warns.append("TADS_ALLOW_CLIENT_REWARD=true: Tads.me rewards are browser-attested (no server-side proof) but are accepted "
-                     "because you enabled it. Set TADS_ALLOW_CLIENT_REWARD=false for Monetag-only unlocking.")
     if not sec.require_telegram_id:
         warns.append("MONETAG_POSTBACK_REQUIRE_TELEGRAM_ID=false: postbacks without telegram_id are accepted (session binding still applies).")
     return Security(**{**sec.__dict__, "warnings": tuple(warns)})

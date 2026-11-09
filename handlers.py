@@ -3,6 +3,7 @@ import html
 import logging
 import random
 import secrets
+import time
 
 from telegram import (
     CopyTextButton,
@@ -36,6 +37,7 @@ from config import (
     POST_CHANNEL,
     POST_MAX_VIDEOS,
     PRIMARY_CHANNEL,
+    REACTIONS_ENABLED,
     SUPPORT_URL,
     VERIFY_REQUIRED,
 )
@@ -44,6 +46,7 @@ from services import stats as stats_svc
 from services.files import delete_file_everywhere  # noqa: F401
 from services.posts import post_button, resolve_link, send_thumb_post, store_to_channels, store_videos  # noqa: F401
 from ads import panel as ads_panel, ratelimit as ads_ratelimit, settings as ads_settings
+from autoposter import integration as autopost
 
 log = logging.getLogger("handlers")
 HTML = ParseMode.HTML
@@ -64,6 +67,8 @@ def bg(coro):
 
 
 async def react(msg, emoji: str | None = None):
+    if not REACTIONS_ENABLED:      # every reaction is an extra Telegram API call per message
+        return
     try:
         await msg.set_reaction(emoji or random.choice(REACTIONS))
     except TelegramError:
@@ -143,49 +148,18 @@ def kb_help() -> InlineKeyboardMarkup:
     return kb_back(*more)
 
 
+_BOT_WINDOW = ads_ratelimit._LocalWindow(100_000, time.monotonic)
+
+
 async def _bot_limited(user, category: str) -> bool:
-    """Per-Telegram-user limit shared by all instances (MongoDB). True = over the limit. Never raises on store problems:
-    the limiter degrades to a strict local window instead of switching itself off."""
+    """Per-Telegram-user limit, in memory (one bot = one process): no MongoDB round trip before the first reply.
+    True = over the limit. Same numbers as ads/ratelimit.py (RL_BOT_START_USER / RL_BOT_MSG_USER)."""
     uid = getattr(user, "id", None)
     if uid is None:
         return False
-    return not await ads_ratelimit.default().allow(category, uid)
-
-
-def _router(context):
-    """The multi-bot router of this instance (None when ROUTING_ENABLED=false or in tests without one)."""
-    return getattr((context.application.bot_data or {}).get("manager"), "router", None)
-
-
-async def _touch(context, user) -> None:
-    """Slide the user's sticky window on this bot. In-memory unless a write is due (once per ROUTER_TOUCH_EVERY seconds)."""
-    r = _router(context)
-    if r is not None and user is not None:
-        await r.touch(user.id)
-
-
-_ROUTER_TIMEOUT = 2.0      # seconds a routing decision may take before the user is simply served here
-
-
-async def _maybe_move(update: Update, context: ContextTypes.DEFAULT_TYPE, token: str) -> bool:
-    """Multi-bot sticky routing for an identified user. True = the user was sent to another bot (the reply is already shown).
-    Moves are rare by design: only when THIS bot is overloaded, or for a user who was idle long enough to be rebalanced."""
-    r = _router(context)
-    if r is None:
-        return False
-    try:
-        d = await asyncio.wait_for(r.on_arrival(update.effective_user.id), _ROUTER_TIMEOUT)
-    except Exception as e:  # noqa: BLE001 - routing must never stop a delivery: serve right here
-        log.warning("router arrival failed: %s", type(e).__name__)
-        return False
-    if d.action != "move" or not d.username:
-        return False
-    await update.effective_message.reply_text(
-        "⚡ <b>This bot is very busy right now.</b>\n\nTap below to continue on a faster one — your file is waiting 🎁",
-        parse_mode=HTML,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚡ Continue", url=f"https://t.me/{d.username}?start={token}")]]),
-    )
-    return True
+    lim = ads_ratelimit.default().limits[category]
+    ok, _wait = _BOT_WINDOW.hit((category, uid), lim.limit, lim.window)
+    return not ok
 
 
 async def deliver_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -213,12 +187,10 @@ async def deliver_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if await _maybe_move(update, context, token):
-        return
-
+    doc_task = asyncio.create_task(db.get_file(token))      # DB lookup runs while Telegram sends the first reply
     status = await msg.reply_text("🔎⚡ <b>Checking your link…</b>", parse_mode=HTML)
 
-    doc = await db.get_file(token)
+    doc = await doc_task
     if not doc:
         await edit(
             status,
@@ -278,7 +250,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer(WHY_ALERT, show_alert=True)
         return
     await q.answer()  # instant feedback, no spinner
-    bg(_touch(context, q.from_user))
 
     screens = {
         "home": (home_text(q.from_user), kb_home()),
@@ -308,7 +279,6 @@ async def fallback_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await _bot_limited(update.effective_user, "bot_msg_user"):
         return                                    # stay silent: a reply to spam would only amplify it
     bg(react(msg, "👀"))
-    bg(_touch(context, update.effective_user))
     await msg.reply_text(
         "🤔💭 I only understand <b>file links</b>!\n\nTap a permanent link to get your file 🔗🎁",
         parse_mode=HTML,
@@ -343,6 +313,7 @@ def kb_menu() -> InlineKeyboardMarkup:
             [btn("📝 Create Post", "m_post"), btn("📊 Stats", "m_stats")],
             [btn("💰 Monetag", "m_monetag")],
         ]
+        + ([[btn("📅 Auto Poster", "nav:dashboard")]] if autopost.enabled() else [])
         + ([[btn("🧠 Smart Ads", "sa:home")]] if ads_settings.SMART_ADS_ENABLED else [])
     )
 
@@ -433,6 +404,7 @@ async def show(q, text: str, kb: InlineKeyboardMarkup):
 
 async def send_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop(POST_KEY, None)
+    await autopost.clear_mode(OWNER_ID)               # /start also cancels an open auto-poster prompt
     await update.effective_message.reply_text(menu_text(await stats_line()), parse_mode=HTML, reply_markup=kb_menu())
 
 
@@ -713,6 +685,8 @@ async def create_post(q, context: ContextTypes.DEFAULT_TYPE):
 
 
 def register_main_handlers(app: Application):
+    if autopost.enabled():
+        autopost.register_handlers(app)               # first: its handlers must win over the owner catch-alls below
     # /start Telegram ka built-in entry hai (link kholne par khud lagta hai). Baaki sab buttons.
     app.add_handler(CommandHandler("start", start_router))
     # --- Smart Ads (owner only, checked inside) ---

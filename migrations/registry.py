@@ -9,15 +9,14 @@ so they stay identical to the ones already in production.
   3 smart_ads_indexes     ad_* collections + gate (ads/migrate.INDEXES, previously ads.store.init) + legacy marker document
   4 rate_limit_indexes    TTL cleanup for the shared rate limiter (ads/ratelimit.py)
   5 query_indexes         indexes for queries that were collection scans (files listing sort, rewards listing)
-  6 routing_indexes       multi-bot sticky routing (routing/router.py): route_bots / route_assign
+  6 autoposter_indexes    auto-poster collections ap_* (autoposter/database.py); per-target ap_posts_* / ap_history_* are indexed lazily
 
 Environment-dependent settings (the sessions TTL equals SESSION_TTL) are not versioned: `reconcilers()` runs on every start.
 """
 from __future__ import annotations
 
 from ads import migrate as ads_migrate
-from migrator import Migration, ensure_index, index_migration
-from routing.router import ROUTING_INDEXES
+from migrator import ensure_index, index_migration
 
 CORE_INDEXES = [
     ("files", "token", {"unique": True}),
@@ -47,13 +46,23 @@ QUERY_INDEXES = [
     ("ad_rewards", [("t", -1)], {}),                 # store.recent_rewards: sort(t, -1)
 ]
 
+AUTOPOSTER_INDEXES = [
+    ("ap_chats", "chat_id", {"unique": True}),
+    ("ap_chats", "next_post_time", {}),
+    ("ap_chats", "processing_until", {}),
+    ("ap_admins", "admin_id", {"unique": True}),
+    ("ap_logs", "created_at", {}),
+    ("ap_reactions", [("chat_id", 1), ("message_id", 1)], {"unique": True}),
+    ("ap_deletes", "delete_at", {}),
+]
+
 MIGRATIONS = [
     index_migration(1, "core_indexes", CORE_INDEXES),
     index_migration(2, "monetag_indexes", MONETAG_INDEXES),
     index_migration(3, "smart_ads_indexes", ads_migrate.INDEXES, extra_up=ads_migrate.write_marker),
     index_migration(4, "rate_limit_indexes", RATE_LIMIT_INDEXES),
     index_migration(5, "query_indexes", QUERY_INDEXES),
-    index_migration(6, "routing_indexes", ROUTING_INDEXES),
+    index_migration(6, "autoposter_indexes", AUTOPOSTER_INDEXES),
 ]
 assert [m.version for m in MIGRATIONS] == sorted({m.version for m in MIGRATIONS})
 

@@ -18,33 +18,15 @@ function fakeEnv(win, opts) {
 }
 const hooks = () => ({ shownCalls: 0, onShown() { this.shownCalls++; } });
 
-test("Tads widget unavailable -> blocked", async () => {
-  const r = await SA.createAdapters(fakeEnv({}, { scriptFails: true })).tads.run({ unit_id: "13070", sdk: "x" }, hooks());
-  assert.deepStrictEqual([r.status, r.reason], ["failed", "blocked"]);
-});
-
-test("Tads onAdsNotFound -> no_fill; onShowReward -> completed", async () => {
-  for (const [mode, want] of [["none", "failed"], ["reward", "completed"]]) {
-    let cfgRef;
-    const win = { tads: { init: (c) => { cfgRef = c; return { showAd: async () => { setImmediate(() => mode === "reward" ? c.onShowReward("ad1") : c.onAdsNotFound()); } }; } } };
-    const r = await SA.createAdapters(fakeEnv(win)).tads.run({ unit_id: "13070" }, hooks());
-    assert.strictEqual(r.status, want);
-    if (want === "failed") assert.strictEqual(r.reason, "no_fill");
-  }
-});
-
-test("Tads click is not a completed view (onClickReward ignored)", async () => {
-  let c0;
-  const win = { tads: { init: (c) => { c0 = c; return { showAd: async () => { setImmediate(() => { c.onClickReward("x"); c.onAdsNotFound(); }); } }; } } };
-  const r = await SA.createAdapters(fakeEnv(win)).tads.run({ unit_id: "13070" }, hooks());
-  assert.strictEqual(r.status, "failed");
+test("only the Monetag adapter exists", () => {
+  assert.deepStrictEqual(Object.keys(SA.createAdapters(fakeEnv({}))), ["monetag"]);
 });
 
 test("runChain: first provider fails undisplayed -> server hands next; both fail -> exhausted", async () => {
   const calls = [];
   const adapters = { monetag: { run: async () => ({ status: "failed", reason: "no_fill", shown: false }) },
-                     tads: { run: async () => ({ status: "failed", reason: "timeout", shown: false }) } };
-  const api = async (path, body) => { calls.push([path, body.event]); return body.event === "fail" && body.ad_id === "a1" ? { ok: true, next: { ok: true, network: "tads", ad_id: "a2" } } : { ok: true, exhausted: true }; };
+                     netb: { run: async () => ({ status: "failed", reason: "timeout", shown: false }) } };   // runChain is generic: "netb" is a fake second adapter
+  const api = async (path, body) => { calls.push([path, body.event]); return body.event === "fail" && body.ad_id === "a1" ? { ok: true, next: { ok: true, network: "netb", ad_id: "a2" } } : { ok: true, exhausted: true }; };
   const out = await SA.runChain({ ok: true, network: "monetag", ad_id: "a1" }, adapters, api, null);
   assert.strictEqual(out.kind, "exhausted"); assert.strictEqual(out.displayed, false);
   assert.deepStrictEqual(calls.map(c => c[1]), ["fail", "fail"]);
@@ -75,14 +57,14 @@ test("claim: gives up after max tries (no infinite loading)", async () => {
   assert.strictEqual(r.ok, false);
 });
 
-test("Tads onShowReward is only a claim: its adId is never sent as proof and a server denial is passed through untouched", async () => {
+test("A completion callback is only a claim: its adId is never sent as proof and a server denial is passed through untouched", async () => {
   const sent = [];
   const api = async (path, body) => { sent.push([path, body]); return { ok: false, error: "This ad provider can't be verified right now. Please try again." }; };
-  const res = { status: "completed", shown: true, adId: "tads-reward-123" };       // what the Tads adapter reports on onShowReward
+  const res = { status: "completed", shown: true, adId: "reward-123" };            // what an adapter reports when the SDK says the ad finished
   const r = await SA.claim({ ad_id: "sid1.abcd" }, res, api, async () => {});
   assert.strictEqual(r.ok, false);                                                  // the browser never upgrades a denial
   assert.deepStrictEqual(sent, [["/api/smart/done", { ad_id: "sid1.abcd", completed: true, non_valued: false }]]);
-  assert.ok(!JSON.stringify(sent).includes("tads-reward-123"));                     // client-supplied reward id is not a credential
+  assert.ok(!JSON.stringify(sent).includes("reward-123"));                     // client-supplied reward id is not a credential
 });
 
 test("claim keeps waiting only while the server says wait, then stops", async () => {

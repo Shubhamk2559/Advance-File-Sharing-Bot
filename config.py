@@ -38,6 +38,9 @@ BACKUP_CHANNEL = int(_req("BACKUP_CHANNEL"))
 CHANNEL_URL = os.getenv("CHANNEL_URL", "").strip()
 SUPPORT_URL = os.getenv("SUPPORT_URL", "").strip()
 
+# Emoji reaction on every user message (extra Telegram API call each time). Off = faster.
+REACTIONS_ENABLED = _bool("REACTIONS_ENABLED", False)
+
 # ---- ad verification ----
 VERIFY_REQUIRED = _bool("VERIFY_REQUIRED", True)
 ADS_REQUIRED = int(os.getenv("ADS_REQUIRED", "1"))
@@ -77,7 +80,7 @@ POST_MAX_VIDEOS = int(os.getenv("POST_MAX_VIDEOS", "10"))
 STATS_TZ_OFFSET_MIN = int(os.getenv("STATS_TZ_OFFSET_MIN", "330"))
 
 # True = post ka button seedha t.me/<bot> link kholta hai (Telegram ka "Open Link" confirm box nahi aata).
-# Har post par random active bot chuna jata hai. False = purana /f/ redirect link (confirm box aayega).
+# False = purana /f/ redirect link (confirm box aayega).
 POST_DIRECT_LINK = _bool("POST_DIRECT_LINK", True)
 
 
@@ -131,7 +134,7 @@ MONETAG_OPTIMIZE = _bool("MONETAG_OPTIMIZE", False)
 #   https://<BASE_URL>/api/monetag/postback?secret=<MONETAG_POSTBACK_SECRET>&ymid={ymid}&event_type={event_type}&reward_event_type={reward_event_type}&zone_id={zone_id}&sub_zone_id={sub_zone_id}&estimated_price={estimated_price}&request_var={request_var}&telegram_id={telegram_id}
 # ---- security profile (fail closed) ----
 # APP_ENV defaults to "production": Monetag postback verification is then MANDATORY, MONETAG_POSTBACK_SECRET is REQUIRED and
-# browser-only rewards (Tads.me) can never unlock a file. A missing/weak secret or AD_VERIFY_MODE=legacy stops the process at
+# browser-only rewards can never unlock a file. A missing/weak secret or AD_VERIFY_MODE=legacy stops the process at
 # startup (see ads/security.py). Use APP_ENV=development only on a test deployment.
 _SEC = _security.resolve(os.environ)
 APP_ENV = _SEC.app_env
@@ -173,14 +176,3 @@ MONETAG_BENCH_MINUTES = _int("MONETAG_BENCH_MINUTES", 30)
 MONETAG_ADMIN_TOKEN = os.getenv("MONETAG_ADMIN_TOKEN", "").strip()
 # Optional: proxy ka country header (e.g. CF-IPCountry). Khali = country-wise stats band.
 MONETAG_GEO_HEADER = os.getenv("MONETAG_GEO_HEADER", "").strip()
-
-
-# ======================================================================
-# ---- Multi-bot sticky routing (routing/). One Koyeb service per bot, one shared MongoDB. See KOYEB.md "Multi-bot". ----
-# ROUTING_ENABLED=false = old behaviour (this bot only, random pick for channel posts). With a single bot it is harmless either way.
-# ======================================================================
-from routing.policy import RouterConfig, self_id_from_env  # noqa: E402
-
-ROUTING_ENABLED = _bool("ROUTING_ENABLED", True)
-ROUTER_CFG = RouterConfig.from_env(os.environ)           # invalid STICKY_TTL / BOT_CAPACITY / ROUTER_* => the process refuses to start
-INSTANCE_ID = self_id_from_env(os.environ)

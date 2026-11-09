@@ -9,8 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SECRET = "s3cr3t-Postback_0123456789abcdef"
 BASE = {"PATH": os.environ.get("PATH", ""), "MAIN_BOT_TOKEN": "123456:TEST-TOKEN", "OWNER_ID": "1", "MONGO_URI": "mongodb://unused",
-        "WEBHOOK_SECRET": "test-webhook-secret-0123456789", "BASE_URL": "https://example.test", "PRIMARY_CHANNEL": "-1001", "BACKUP_CHANNEL": "-1002",
-        "TADS_WIDGET_ID": "13070"}
+        "WEBHOOK_SECRET": "test-webhook-secret-0123456789", "BASE_URL": "https://example.test", "PRIMARY_CHANNEL": "-1001", "BACKUP_CHANNEL": "-1002"}
 
 
 def run_main(extra: dict):
@@ -33,7 +32,7 @@ class MainWiringTests(unittest.TestCase):
         self.assertEqual(out["verified_flags"], [True, True])
         self.assertIn("Verification failed", out["auth_fresh"])                # got past the expiry gate, failed on (empty) initData
         self.assertIn("Session expired", out["auth_expired"])                  # explicit expiry, not only Mongo's TTL reaper
-        self.assertTrue(all("tads" not in u for u in out["probe"]), out["probe"])   # Tads isn't served, so its host must not count as a blocker
+        self.assertTrue(any("googlesyndication" in u for u in out["probe"]), out["probe"])   # DNS ad-blocker bait hosts are probed
         self.assertNotIn(SECRET, r.stdout + r.stderr)                          # nothing prints the secret
         self.assertFalse(out["secret_in_html"])                                # ... and it never reaches the served Mini App page
 
@@ -52,7 +51,7 @@ class MainWiringTests(unittest.TestCase):
         out = json.loads(r.stdout.strip().splitlines()[-1])
         self.assertFalse(out["strict"])
         self.assertFalse(out["postback_mounted"])                              # no secret => endpoint isn't mounted at all
-        self.assertTrue(any("tads" in u for u in out["probe"]), out["probe"])  # Tads still served in development
+        self.assertTrue(all("tads" not in u for u in out["probe"]), out["probe"])
         self.assertIn("development profile", r.stdout + r.stderr)                         # loudly labelled
 
 

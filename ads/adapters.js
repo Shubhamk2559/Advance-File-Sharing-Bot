@@ -3,8 +3,6 @@
  * SDK surfaces used (verified against the official docs on 2026-11-05):
  *  - Monetag   : window.show_<ZONE>({ymid, requestVar}) -> Promise, resolves when the ad closes; result.reward_event_type
  *                ('valued' | 'non_valued'). Rejects with e.g. "Empty feed" when nothing can be shown.   (docs.monetag.com / existing integration)
- *  - Tads.me   : window.tads.init({widgetId, debug, onShowReward(adId), onClickReward(adId), onAdsNotFound}) -> controller;
- *                controller.showAd() fetches an ad and opens a fullscreen overlay. Script: https://w.tads.me/widget.js. (docs.tads.me vanilla-js)
  *
  * Rules: a click or a close is NEVER completion. Completion is only the network's own completion callback, and the
  * server decides whether it earns a reward. This file never grants anything.
@@ -88,56 +86,8 @@
     };
   }
 
-  // ------------------------------------------------------------------ Tads.me
-  function tadsAdapter(env) {
-    var cur = null, controllers = {};
-    return {
-      name: "tads",
-      run: async function (cfg, hooks) {
-        hooks = once(hooks);
-        var win = env.win, id = String(cfg.unit_id);
-        if (!(win.tads && win.tads.init)) {
-          try { await loadScript(env, cfg.sdk, {}); }
-          catch (e) { return { status: "failed", reason: text(e) === "blocked" ? "blocked" : "timeout", shown: false }; }
-          if (!(await waitFor(env, function () { return !!(win.tads && win.tads.init); }, GLOBAL_WAIT_MS)))
-            return { status: "failed", reason: "blocked", shown: false };
-        }
-        env.ensureContainer("tads-container-" + id);
-        var ctl = controllers[id] || (win.tads.controllers && win.tads.controllers[id]);
-        if (!ctl) {
-          try {
-            ctl = win.tads.init({
-              widgetId: id, debug: !!cfg.debug,
-              onShowReward: function (adId) { if (cur) cur.reward(adId); },
-              onClickReward: function () { /* a click is never a completed rewarded view */ },
-              onAdsNotFound: function () { if (cur) cur.noAds(); },
-            });
-          } catch (e) { return { status: "failed", reason: "error", shown: false }; }
-          controllers[id] = ctl;
-        }
-        return new Promise(function (resolve) {
-          var shown = false, settled = false, wd, confirmT;
-          function finish(r) {
-            if (settled) return; settled = true;
-            env.clearTimeout(wd); env.clearTimeout(confirmT); cur = null; resolve(r);
-          }
-          function markShown() { if (!shown) { shown = true; hooks.onShown(); } }
-          cur = {
-            reward: function (adId) { markShown(); finish({ status: "completed", shown: true, adId: adId }); },
-            noAds: function () { if (!shown) finish({ status: "failed", reason: "no_fill", shown: false }); },
-          };
-          wd = env.setTimeout(function () { finish({ status: "failed", reason: "timeout", shown: shown }); }, RUN_TIMEOUT_MS);
-          Promise.resolve().then(function () { return ctl.showAd(); }).then(function () {
-            // showAd() resolves when the overlay opens; wait a beat so a late onAdsNotFound can still win.
-            confirmT = env.setTimeout(function () { if (!settled) markShown(); }, 1500);
-          }, function () { finish({ status: "failed", reason: "error", shown: shown }); });
-        });
-      },
-    };
-  }
-
   function createAdapters(env) {
-    var a = [monetagAdapter(env), tadsAdapter(env)], out = {};
+    var a = [monetagAdapter(env)], out = {};
     a.forEach(function (x) { out[x.name] = x; });
     return out;
   }

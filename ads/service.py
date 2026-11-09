@@ -56,8 +56,6 @@ def configure(deps: Deps) -> None:
 
 
 def _public(net: str, cfg: dict) -> dict:
-    if net == "tads":
-        return {"unit_id": settings.unit_id(cfg, net), "sdk": settings.TADS_SDK_URL, "debug": settings.TADS_DEBUG}
     return {}
 
 
@@ -84,13 +82,15 @@ async def _launch(s: dict, user_id: int, chain: list, idx: int, country, prev_ad
                                        "round": rnd, "chain_len": len(chain)}):
         await store.release_slot(sid, ad_id)
         return {"ok": False, "error": "Could not start the ad. Please try again."}
-    await D.sessions.start_ad(sid, ad_id, zone or net)
-    if net == "monetag" and D.monetag:
-        try:
-            await D.monetag.record_attempt(ad_id, sid, zone, country, user_id=user_id)
-        except Exception:  # noqa: BLE001 — analytics must never block delivery
-            slog.event("monetag_record_attempt_failed", level="warning", ad_id=ad_id)
-    await store.log_event(ad_id, "start", network=net, attempt=idx + 1)
+    async def _record_attempt():
+        if net == "monetag" and D.monetag:
+            try:
+                await D.monetag.record_attempt(ad_id, sid, zone, country, user_id=user_id)
+            except Exception:  # noqa: BLE001 — analytics must never block delivery
+                slog.event("monetag_record_attempt_failed", level="warning", ad_id=ad_id)
+    # independent writes: one round trip instead of three in a row
+    await asyncio.gather(D.sessions.start_ad(sid, ad_id, zone or net), _record_attempt(),
+                         store.log_event(ad_id, "start", network=net, attempt=idx + 1))
     slog.event("ad_start", ad_id=ad_id, network=net, attempt=idx + 1, user_id=user_id)
     out = {"ok": True, "sid": sid, "ad_id": ad_id, "ymid": ad_id, "network": net, "attempt": idx + 1,
            "ads_done": s.get("ads_done", 0), "ads_required": s.get("ads_required", 1)}
@@ -107,8 +107,7 @@ async def start(s: dict, user_id: int, country=None) -> dict:
     plan = await engine.plan_request(D.rng)
     if not plan.order:
         return {"ok": False, "code": "no_network", "error": "No ad provider is available right now. Please try again shortly."}
-    await store.set_chain(s["sid"], plan.order)
-    rnd = await store.next_round(s["sid"])
+    _, rnd = await asyncio.gather(store.set_chain(s["sid"], plan.order), store.next_round(s["sid"]))
     slog.event("ad_plan", sid=s["sid"], order=plan.order, mode=plan.mode, reason=plan.reason, round=rnd)
     return await _launch(s, user_id, plan.order, 0, country, None, rnd)
 
@@ -230,7 +229,7 @@ async def done(s: dict, ad_id, completed: bool, non_valued: bool = False) -> dic
                 return None
             facts.postback_seen, facts.postback_valued = bool(m.get("pb_seen")), bool(m.get("pb_valued"))
         cfg = await engine.get_config()
-        return verify.decide(facts, pol, bool(cfg["networks"][net]["allow_client_reward"]))
+        return verify.decide(facts, pol, bool(cfg["networks"].get(net, {}).get("allow_client_reward")))   # a leftover attempt of a removed network is denied by verify.decide
 
     dec = await _decide()
     if dec is None:
@@ -240,7 +239,7 @@ async def done(s: dict, ad_id, completed: bool, non_valued: bool = False) -> dic
     if dec.action == "wait" and dec.reason == "waiting_for_server_signal" and D.long_poll > 0:
         deadline = time.monotonic() + D.long_poll
         while dec.action == "wait" and dec.reason == "waiting_for_server_signal" and time.monotonic() < deadline:
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.2)
             nd = await _decide()
             if nd is None:
                 await store.finalize(ad_id, "denied", "unverified")
